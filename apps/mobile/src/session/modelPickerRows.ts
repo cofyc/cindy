@@ -74,8 +74,16 @@ function normalizedCostDiscount(value: unknown): number | undefined {
     : undefined;
 }
 
+/** 对齐桌面 formatModelPriceAmount:小于 1 分保留最多 4 位,否则最多 2 位,不补零。 */
+function compactNumber(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: value > 0 && value < 0.01 ? 4 : 2,
+    useGrouping: false,
+  }).format(value);
+}
+
 function formatUsd(value: number): string {
-  return `$${Number(value.toFixed(2))}`;
+  return `$${compactNumber(value)}`;
 }
 
 function compactPercent(discount: number): string {
@@ -133,6 +141,8 @@ export interface PickerPricePresentation {
 /**
  * 模型选项页价格展示。报价表给标准价;目录 CatalogModel.cost 给折后价(桌面同口径)。
  * 目录缺失时回退报价上的 costDiscount。比例不一致时不挂折扣,避免把混用价当成折后价。
+ * v1 通道只有 XD USD 扁平表:明确非 xd 的供应商行不读这张表(对齐桌面 provider-aware
+ * 查找);provider === null 是旧被控端扁平回退,仍可用。
  */
 export function presentPickerPrice(args: {
   pricing: MobileModelPricingMap | null;
@@ -140,6 +150,7 @@ export function presentPickerPrice(args: {
   modelId: string;
   agentKind: AgentKind | null;
 }): PickerPricePresentation | null {
+  if (args.provider && args.provider.id !== 'xd') return null;
   const quote = args.pricing?.[args.modelId];
   if (
     !quote ||

@@ -176,6 +176,40 @@ describe('presentPickerPrice', () => {
       discountLabel: null,
     });
   });
+
+  it('非 XD 供应商即使 modelId 撞车也不套用 XD 报价', () => {
+    const openai = {
+      id: 'openai',
+      name: 'OpenAI',
+      agents: ['codex'],
+      connected: true,
+      models: { codex: [{ id: 'gpt-5.5', cost: { input: 1, output: 5 } }] },
+    } as unknown as ProviderView;
+    expect(
+      presentPickerPrice({
+        pricing: { 'gpt-5.5': { inputUsdPerMtok: 3, outputUsdPerMtok: 15, costDiscount: 0.4 } },
+        provider: openai,
+        modelId: 'gpt-5.5',
+        agentKind: 'codex',
+      }),
+    ).toBeNull();
+  });
+
+  it('折后价小于 1 分时保留最多 4 位小数,不显示成 $0', () => {
+    expect(
+      presentPickerPrice({
+        pricing: { cheap: { inputUsdPerMtok: 0.04, outputUsdPerMtok: 0.04, costDiscount: 0.9 } },
+        provider: null,
+        modelId: 'cheap',
+        agentKind: 'codex',
+      }),
+    ).toEqual({
+      title: '每百万 token',
+      amountsLine: '输入 $0.004 · 输出 $0.004',
+      discountLabel: '折扣中，较标准价省 90%',
+      discountPct: 90,
+    });
+  });
 });
 
 describe('effortLabelFor —— 五级优先(i18n → 模型覆盖 → capabilities → 兼容词表 → 原 id)', () => {
