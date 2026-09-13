@@ -59,13 +59,8 @@ appId: ${APP_ID}
       - tapOn:
           id: "login.consentAgree"
           retryTapIfNoChange: true
-      - extendedWaitUntil:
-          visible:
-            id: "login.emailCodeButton"
-          timeout: 15000
-      - tapOn:
-          id: "login.emailCodeButton"
-          retryTapIfNoChange: true
+      # email-only has a single method, so the real login controller auto-requests
+      # the code after consent and renders the code input directly.
       - extendedWaitUntil:
           visible:
             id: "login.codeInput"
