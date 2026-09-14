@@ -22,6 +22,10 @@ describe('native e2e environment', () => {
     expect(runner).toContain("import { resolveJavaRuntimeEnv } from './java-runtime-env.mjs';");
     expect(runner).toContain('const toolEnv = resolveJavaRuntimeEnv(process.env);');
     expect(runner).toContain('...toolEnv');
+    const simStart = readFileSync(resolve(process.cwd(), 'scripts/sim-start.mjs'), 'utf8');
+    expect(simStart).toContain("import { parseProjectEnv } from '@expo/env';");
+    expect(simStart).toContain('projectEnv.env.EXPO_PUBLIC_LOGIN_SCENARIO');
+    expect(simStart).toContain('const loginScenario = process.env.EXPO_PUBLIC_LOGIN_SCENARIO?.trim()');
     expect(runner).toContain("process.env.XDT_MOBILE_E2E_EXPO_LAUNCH_DELAY_MS ?? '20000'");
     expect(runner).toContain("process.env.XDT_MOBILE_E2E_EXPO_TERMINATE_BEFORE_OPEN ?? 'true'");
     expect(runner).toContain("process.env.XDT_MOBILE_E2E_EXPO_OPEN_BEFORE_TEST ?? 'true'");
@@ -192,6 +196,17 @@ describe('native e2e environment', () => {
     });
     expect(missingCredentials.status).toBe(2);
     expect(missingCredentials.stderr).toContain('isolated test environment');
+  });
+
+  it('keeps Maestro dry runs independent of Metro ownership', () => {
+    const script = resolve(process.cwd(), 'scripts/maestro-e2e.mjs');
+    const result = spawnSync(process.execPath, [script, '--dry-run', '--flow', 'login_mock_no_clear.yaml'], {
+      cwd: process.cwd(), encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, EXPO_PUBLIC_LOGIN_SCENARIO: '' },
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('maestro dry run: APP_ID=');
+    expect(result.stderr).not.toContain('Active Metro');
   });
 
   it('keeps cloud voice preflight opt-in and secret-redacted with the credential relay removed', () => {

@@ -20,42 +20,20 @@ appId: ${APP_ID}
       id: "files.screen"
     timeout: 10000
 - assertVisible:
-    id: "files.locationBar"
-- assertVisible:
-    id: "files.directoryActions"
-- assertVisible:
-    id: "files.dirEntry.fixtures"
+    id: "files.navRow"
 - takeScreenshot:
     path: visual-files
-- scrollUntilVisible:
-    element:
-      id: "files.fileEntry.about.txt"
-    direction: DOWN
-    timeout: 10000
-- tapOn:
-    id: "files.fileEntry.about.txt"
-- scrollUntilVisible:
-    element:
-      id: "files.previewBlock"
-    direction: DOWN
-    timeout: 10000
-- assertVisible:
-    id: "files.previewBlock"
-- assertVisible:
-    id: "files.selectedPath"
-- assertVisible:
-    id: "files.previewActions"
 - extendedWaitUntil:
     visible:
-      id: "files.loadPreviewButton"
+      id: "files.row.about.txt"
     timeout: 10000
 - tapOn:
-    id: "files.loadPreviewButton"
+    id: "files.row.about.txt"
 - extendedWaitUntil:
     visible:
-      id: "files.previewText"
+      id: "filePreview.screen"
     timeout: 10000
 - assertVisible:
-    id: "files.previewText"
+    id: "filePreview.markdownRendered"
 - takeScreenshot:
     path: visual-files-preview

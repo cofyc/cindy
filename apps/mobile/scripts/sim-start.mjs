@@ -27,6 +27,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { parseProjectEnv } from '@expo/env';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mobileClientBundleEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
@@ -85,10 +86,18 @@ const buildEnv = withLocalMobileRegionConfig(
 const envResult = ensureMobileEnv({ mobileDir, authRegion: region, endpointEnv: buildEnv });
 console.log(formatMobileEnvStatus(envResult, worktreeRoot));
 const envChanged = envResult.created || envResult.addedKeys.length > 0;
+const projectEnv = parseProjectEnv(mobileDir, {
+  mode: process.env.NODE_ENV ?? 'development',
+  silent: true,
+  systemEnv: { ...process.env },
+});
+const loginScenario = process.env.EXPO_PUBLIC_LOGIN_SCENARIO?.trim()
+  || projectEnv.env.EXPO_PUBLIC_LOGIN_SCENARIO?.trim()
+  || '';
 const envFingerprint = metroEnvironmentFingerprint({
   env: {
     ...buildEnv,
-    EXPO_PUBLIC_LOGIN_SCENARIO: process.env.EXPO_PUBLIC_LOGIN_SCENARIO?.trim() ?? '',
+    EXPO_PUBLIC_LOGIN_SCENARIO: loginScenario,
   },
   files: {
     '.env': readFileSync(envResult.envPath, 'utf8'),
@@ -208,7 +217,7 @@ if (portArgs.port === DEFAULT_PORT && Number.isInteger(child.pid)) {
     launcherPid: child.pid,
     source: sourceIdentity,
     region,
-    loginScenario: process.env.EXPO_PUBLIC_LOGIN_SCENARIO?.trim() ?? '',
+    loginScenario,
     envFingerprint,
     worktreeRoot,
   });

@@ -62,16 +62,6 @@ for (const flow of resolvedFlows) {
 }
 
 const includesLogin = resolvedFlows.some((flow) => flowIncludesLogin(flow));
-if (includesLogin) {
-  const metroPort = expoUrl ? new URL(expoUrl).port || '8081' : '8081';
-  const ownership = probeMetroOwnership(Number(metroPort));
-  if (ownership?.loginScenario !== loginScenario) {
-    throw new Error([
-      `Active Metro on port ${metroPort} is not verified with EXPO_PUBLIC_LOGIN_SCENARIO=${loginScenario}.`,
-      'Start Metro through pnpm mobile:sim:start with that variable, or use local-device-link-smoke --start-expo.',
-    ].join('\n'));
-  }
-}
 
 if (options.dryRun) {
   console.log(`maestro dry run: APP_ID=${appId}`);
@@ -86,6 +76,17 @@ if (options.dryRun) {
   if (hostAutomationsUrl) console.log(`- host automations url: ${hostAutomationsUrl}`);
   for (const flow of resolvedFlows) console.log(`- ${flow}`);
   process.exit(0);
+}
+
+if (includesLogin) {
+  const metroPort = expoUrl ? new URL(expoUrl).port || '8081' : '8081';
+  const ownership = probeMetroOwnership(Number(metroPort));
+  if (ownership?.loginScenario !== loginScenario) {
+    throw new Error([
+      `Active Metro on port ${metroPort} is not verified with EXPO_PUBLIC_LOGIN_SCENARIO=${loginScenario}.`,
+      'Start Metro through pnpm mobile:sim:start with that variable, or use local-device-link-smoke --start-expo.',
+    ].join('\n'));
+  }
 }
 
 if (!options.skipDoctor) {
@@ -229,6 +230,7 @@ function flowIncludesLogin(flow, seen = new Set()) {
   if (seen.has(flow)) return false;
   seen.add(flow);
   const source = readFileSync(flow, 'utf8');
+  if (/\/login_mock(?:_no_clear)?\.yaml$/.test(flow)) return true;
   if (/runFlow:\s*login_mock(?:_no_clear)?\.yaml/.test(source)) return true;
   return [...source.matchAll(/runFlow:\s*([^\s#]+\.yaml)/g)].some(([, child]) => {
     const childPath = resolve(flowRoot, child);
