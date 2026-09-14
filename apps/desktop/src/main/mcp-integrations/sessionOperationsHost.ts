@@ -111,17 +111,22 @@ export function createSessionOperationsDeps(
   };
 }
 
-/** cindy_helper `sessionOps` 回调组:localDb 未就绪统一返回 HOST_NOT_READY。 */
+/**
+ * cindy_helper `sessionOps` 回调组:localDb 未就绪统一返回 HOST_NOT_READY;
+ * 预检阶段(loadSessions / Orca 关系表查询等)抛出的异常映射为 INTERNAL,
+ * 不让异常穿透到 MCP 层变成无结构的失败。
+ */
 export function createSessionOpsCallbacks(isTurnRunning: (sessionId: string) => boolean) {
   const deps = createSessionOperationsDeps(isTurnRunning);
-  const notReady = { ok: false as const, errorCode: 'HOST_NOT_READY' as const, message: 'localDb not ready' };
-  const guarded = <T>(run: () => Promise<T>): Promise<T | typeof notReady> =>
+  const hostFailure = (errorCode: 'HOST_NOT_READY' | 'INTERNAL', message: string) =>
+    ({ ok: false as const, errorCode, message });
+  type HostFailure = ReturnType<typeof hostFailure>;
+  const notReady = hostFailure('HOST_NOT_READY', 'localDb not ready');
+  const guarded = <T>(run: () => Promise<T>): Promise<T | HostFailure> =>
     tryGetDbClient()
-      ? run().catch((error) => ({
-          ok: false as const,
-          errorCode: 'INTERNAL' as const,
-          message: error instanceof Error ? error.message : String(error),
-        }))
+      ? run().catch((error) =>
+          hostFailure('INTERNAL', error instanceof Error ? error.message : String(error)),
+        )
       : Promise.resolve(notReady);
   return {
     moveSessions: (params: { sessionIds: string[]; target: SessionMoveTarget }): Promise<MoveSessionsResult> =>
