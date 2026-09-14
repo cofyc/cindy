@@ -230,7 +230,7 @@ function flowIncludesLogin(flow, seen = new Set()) {
   if (seen.has(flow)) return false;
   seen.add(flow);
   const source = readFileSync(flow, 'utf8');
-  if (/\/login_mock(?:_no_clear)?\.yaml$/.test(flow)) return true;
+  if (/(^|[\\/])login_mock(?:_no_clear)?\.yaml$/.test(flow)) return true;
   if (/runFlow:\s*login_mock(?:_no_clear)?\.yaml/.test(source)) return true;
   return [...source.matchAll(/runFlow:\s*([^\s#]+\.yaml)/g)].some(([, child]) => {
     const childPath = resolve(flowRoot, child);

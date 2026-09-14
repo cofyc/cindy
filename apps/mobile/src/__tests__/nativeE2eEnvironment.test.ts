@@ -26,6 +26,11 @@ describe('native e2e environment', () => {
     expect(simStart).toContain("import { parseProjectEnv } from '@expo/env';");
     expect(simStart).toContain('projectEnv.env.EXPO_PUBLIC_LOGIN_SCENARIO');
     expect(simStart).toContain('const loginScenario = process.env.EXPO_PUBLIC_LOGIN_SCENARIO?.trim()');
+    expect(simStart).toContain('writeMetroOwner(portArgs.port, {');
+    expect(simStart).toContain("child.once('exit', () => clearMetroOwner(portArgs.port, child.pid));");
+    expect(simStart).not.toContain('writeMetroOwner(DEFAULT_PORT,');
+    expect(simStart).not.toContain('clearMetroOwner(DEFAULT_PORT,');
+    expect(runner).toContain("/(^|[\\\\/])login_mock(?:_no_clear)?\\.yaml$/");
     expect(runner).toContain("process.env.XDT_MOBILE_E2E_EXPO_LAUNCH_DELAY_MS ?? '20000'");
     expect(runner).toContain("process.env.XDT_MOBILE_E2E_EXPO_TERMINATE_BEFORE_OPEN ?? 'true'");
     expect(runner).toContain("process.env.XDT_MOBILE_E2E_EXPO_OPEN_BEFORE_TEST ?? 'true'");

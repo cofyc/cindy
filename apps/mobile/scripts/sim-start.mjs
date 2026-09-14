@@ -211,8 +211,8 @@ const child = spawn(invocation.command, invocation.args, {
   windowsVerbatimArguments: invocation.windowsVerbatimArguments,
 });
 
-if (portArgs.port === DEFAULT_PORT && Number.isInteger(child.pid)) {
-  writeMetroOwner(DEFAULT_PORT, {
+if (Number.isInteger(child.pid)) {
+  writeMetroOwner(portArgs.port, {
     pid: child.pid,
     launcherPid: child.pid,
     source: sourceIdentity,
@@ -221,7 +221,7 @@ if (portArgs.port === DEFAULT_PORT && Number.isInteger(child.pid)) {
     envFingerprint,
     worktreeRoot,
   });
-  child.once('exit', () => clearMetroOwner(DEFAULT_PORT, child.pid));
+  child.once('exit', () => clearMetroOwner(portArgs.port, child.pid));
 }
 
 child.once('error', (error) => {
