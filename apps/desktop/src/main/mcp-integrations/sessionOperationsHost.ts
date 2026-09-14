@@ -116,7 +116,13 @@ export function createSessionOpsCallbacks(isTurnRunning: (sessionId: string) => 
   const deps = createSessionOperationsDeps(isTurnRunning);
   const notReady = { ok: false as const, errorCode: 'HOST_NOT_READY' as const, message: 'localDb not ready' };
   const guarded = <T>(run: () => Promise<T>): Promise<T | typeof notReady> =>
-    tryGetDbClient() ? run() : Promise.resolve(notReady);
+    tryGetDbClient()
+      ? run().catch((error) => ({
+          ok: false as const,
+          errorCode: 'INTERNAL' as const,
+          message: error instanceof Error ? error.message : String(error),
+        }))
+      : Promise.resolve(notReady);
   return {
     moveSessions: (params: { sessionIds: string[]; target: SessionMoveTarget }): Promise<MoveSessionsResult> =>
       guarded(() => moveSessions(deps, params)),
