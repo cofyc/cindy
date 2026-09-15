@@ -4,6 +4,38 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('native e2e environment', () => {
+  it('waits for the plain-text preview in both file-browser flows', () => {
+    for (const name of ['file_browser.yaml', 'visual_files.yaml']) {
+      const flow = readFileSync(resolve(process.cwd(), 'e2e/maestro', name), 'utf8').replace(/\r\n/g, '\n');
+      expect(flow).toContain('id: "files.row.about.txt"');
+      expect(flow).toMatch(/- extendedWaitUntil:\s+visible:\s+id: "filePreview.sourceReady"\s+timeout: 10000/);
+      expect(flow).not.toContain('filePreview.markdownRendered');
+      // The app defaults to a grid; select list view before looking for rows.
+      const listView = flow.indexOf('id: "files.menu.view.list"');
+      expect(listView).toBeGreaterThan(flow.indexOf('id: "files.titleMenuButton"'));
+      expect(listView).toBeLessThan(flow.indexOf('id: "files.row.about.txt"'));
+    }
+  });
+
+  it('captures file screenshots only after listing and preview readiness', () => {
+    const flow = readFileSync(resolve(process.cwd(), 'e2e/maestro/visual_files.yaml'), 'utf8').replace(/\r\n/g, '\n');
+    const listReady = flow.search(/- extendedWaitUntil:\s+visible:\s+id: "files.row.about.txt"/);
+    const previewReady = flow.search(/- extendedWaitUntil:\s+visible:\s+id: "filePreview.sourceReady"/);
+    expect(listReady).toBeGreaterThanOrEqual(0);
+    expect(listReady).toBeLessThan(flow.indexOf('path: visual-files\n'));
+    expect(previewReady).toBeGreaterThanOrEqual(0);
+    expect(previewReady).toBeLessThan(flow.indexOf('path: visual-files-preview'));
+  });
+
+  it('opens usage details from inside the visible menu modal', () => {
+    const flow = readFileSync(resolve(process.cwd(), 'e2e/maestro/visual_session_controls_usage.yaml'), 'utf8');
+    expect(flow).toContain('id: "session.menuUsageRow"');
+    expect(flow.indexOf('id: "session.menuUsageRow"')).toBeGreaterThan(flow.indexOf('id: "session.menuSheet"'));
+    expect(flow).not.toContain('id: "session.usageButton"');
+    const menu = readFileSync(resolve(process.cwd(), 'src/session/SessionMenuSheet.tsx'), 'utf8');
+    expect(menu).toMatch(/<SessionUsageSummary[^>]+onPress=\{openInfo\}/);
+  });
+
   it('uses a Java 17 runtime for Maestro without requiring global shell changes', () => {
     const helper = readFileSync(resolve(process.cwd(), 'scripts/java-runtime-env.mjs'), 'utf8');
     const doctor = readFileSync(resolve(process.cwd(), 'scripts/native-e2e-doctor.mjs'), 'utf8');

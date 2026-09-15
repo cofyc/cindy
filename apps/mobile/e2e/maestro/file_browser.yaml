@@ -14,6 +14,10 @@ appId: ${APP_ID}
     id: "files.title"
 - assertVisible:
     id: "files.summary"
+- tapOn:
+    id: "files.titleMenuButton"
+- tapOn:
+    id: "files.menu.view.list"
 - extendedWaitUntil:
     visible:
       id: "files.row.about.txt"
@@ -26,8 +30,10 @@ appId: ${APP_ID}
     timeout: 10000
 - assertVisible:
     id: "filePreview.title"
-- assertVisible:
-    id: "filePreview.markdownRendered"
+- extendedWaitUntil:
+    visible:
+      id: "filePreview.sourceReady"
+    timeout: 10000
 - tapOn:
     id: "filePreview.copyPath"
 - assertVisible:

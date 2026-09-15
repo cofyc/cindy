@@ -128,7 +128,7 @@ const requiredFlowMarkers = [
   'files.row.',
   'filePreview.screen',
   'filePreview.title',
-  'filePreview.markdownRendered',
+  'filePreview.sourceReady',
   'filePreview.copyPath',
   'filePreview.notice',
   'message.imageLightbox',
@@ -504,6 +504,17 @@ const requiredSourceAnchors = [
   'session.menuReadOnlyNotice',
   'session.collaborationReadOnlyComposer',
   'files.screen',
+  'files.navRow',
+  'files.title',
+  'files.summary',
+  'files.titleMenuButton',
+  'files.menu.',
+  'files.row.',
+  'filePreview.screen',
+  'filePreview.title',
+  'filePreview.sourceReady',
+  'filePreview.copyPath',
+  'filePreview.notice',
 ];
 
 for (const flow of requiredFlows) {

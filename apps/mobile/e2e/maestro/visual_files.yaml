@@ -21,19 +21,25 @@ appId: ${APP_ID}
     timeout: 10000
 - assertVisible:
     id: "files.navRow"
-- takeScreenshot:
-    path: visual-files
+- tapOn:
+    id: "files.titleMenuButton"
+- tapOn:
+    id: "files.menu.view.list"
 - extendedWaitUntil:
     visible:
       id: "files.row.about.txt"
     timeout: 10000
+- takeScreenshot:
+    path: visual-files
 - tapOn:
     id: "files.row.about.txt"
 - extendedWaitUntil:
     visible:
       id: "filePreview.screen"
     timeout: 10000
-- assertVisible:
-    id: "filePreview.markdownRendered"
+- extendedWaitUntil:
+    visible:
+      id: "filePreview.sourceReady"
+    timeout: 10000
 - takeScreenshot:
     path: visual-files-preview
