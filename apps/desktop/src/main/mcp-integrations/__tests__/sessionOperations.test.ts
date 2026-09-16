@@ -83,14 +83,27 @@ describe('moveSessions', () => {
     expect(updateSession).not.toHaveBeenCalled();
   });
 
-  it('stores the canonical directory so a symlinked working_dir cannot be persisted', async () => {
-    // stat() 会跟随软链;把字面串写进 session 意味着日后恢复以链接目标为 cwd。
+  it('rejects a symlinked working_dir so approval and the stored path cannot diverge', async () => {
+    // 审批发生在入参上,若这里静默替换成 realpath,用户批准的目录与实际生效的目录就不是同一个。
     const { deps, updateSession } = makeDeps([row('a')], {
       resolveDirectory: async () => '/real/project',
     });
     const res = await moveSessions(deps, {
       sessionIds: ['a'],
       target: { kind: 'project', workingDir: '/link/project' },
+    });
+    expect(res).toMatchObject({ ok: false, errorCode: 'INVALID_ARGS' });
+    expect(res.ok === false && res.message).toContain('/real/project');
+    expect(updateSession).not.toHaveBeenCalled();
+  });
+
+  it('accepts a working_dir that is already canonical', async () => {
+    const { deps, updateSession } = makeDeps([row('a')], {
+      resolveDirectory: async (path: string) => path,
+    });
+    const res = await moveSessions(deps, {
+      sessionIds: ['a'],
+      target: { kind: 'project', workingDir: '/real/project' },
     });
     expect(res.ok).toBe(true);
     expect(updateSession.mock.calls[0][1]).toMatchObject({ workingDir: '/real/project' });

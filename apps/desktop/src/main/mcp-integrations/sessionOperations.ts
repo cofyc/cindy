@@ -156,8 +156,17 @@ export async function moveSessions(
     if (!canonical) {
       return err('INVALID_ARGS', `working_dir 不是已存在的目录: ${params.target.workingDir}`);
     }
-    // 落库与回报都用解完 symlink 的真实路径,避免写进去的字面串日后指向别处。
-    params = { ...params, target: { kind: 'project', workingDir: canonical } };
+    // 审批发生在工具入参上(见 mcp-tool-approval-policy),而落库的必须是真实目录。
+    // 若两者不一致就**拒绝**而不是静默替换 —— 否则用户批准的是链接路径、
+    // 实际授予的却是链接目标(恶意仓库可放一个指向 HOME 的 project 链接)。
+    // 让调用方带着真实路径重来,批准的、存下的、日后生效的才是同一个目录。
+    if (canonical !== params.target.workingDir) {
+      return err(
+        'INVALID_ARGS',
+        `working_dir 是软链或别名,实际指向 ${canonical}。请直接用该真实路径重试,` +
+          '以免审批看到的目录与实际生效的目录不一致。',
+      );
+    }
   }
   const loaded = await loadAll(deps, params.sessionIds);
   if (!Array.isArray(loaded)) return loaded;
