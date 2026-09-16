@@ -6,7 +6,7 @@
  * (mcp-providers 不能反向 import maker-host/index,会成环)。
  */
 
-import { stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
@@ -92,12 +92,14 @@ export function createSessionOperationsDeps(
     },
     isTurnRunning,
     isImAttached: (sessionId) => bindingStore.findByTarget(sessionId) !== null,
-    isDirectory: async (path) => {
-      if (!isAbsolute(path)) return false;
+    resolveDirectory: async (path) => {
+      if (!isAbsolute(path)) return null;
       try {
-        return (await stat(path)).isDirectory();
+        // realpath 解 symlink/junction:批准、落库与日后恢复必须是同一个真实目录。
+        const canonical = await realpath(path);
+        return (await stat(canonical)).isDirectory() ? canonical : null;
       } catch {
-        return false;
+        return null;
       }
     },
     // 带写入前复核的更新在 IM binding 的串行队列里执行:复核里的 isImAttached 与随后的

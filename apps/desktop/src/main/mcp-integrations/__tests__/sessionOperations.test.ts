@@ -49,7 +49,7 @@ function makeDeps(rows: SessionOpsRow[], overrides: Partial<SessionOperationsDep
     listWorkerSessionIds: async () => [],
     isTurnRunning: () => false,
     isImAttached: () => false,
-    isDirectory: async () => true,
+    resolveDirectory: async (path: string) => path,
     updateSession,
     ...overrides,
   };
@@ -83,8 +83,21 @@ describe('moveSessions', () => {
     expect(updateSession).not.toHaveBeenCalled();
   });
 
+  it('stores the canonical directory so a symlinked working_dir cannot be persisted', async () => {
+    // stat() 会跟随软链;把字面串写进 session 意味着日后恢复以链接目标为 cwd。
+    const { deps, updateSession } = makeDeps([row('a')], {
+      resolveDirectory: async () => '/real/project',
+    });
+    const res = await moveSessions(deps, {
+      sessionIds: ['a'],
+      target: { kind: 'project', workingDir: '/link/project' },
+    });
+    expect(res.ok).toBe(true);
+    expect(updateSession.mock.calls[0][1]).toMatchObject({ workingDir: '/real/project' });
+  });
+
   it('INVALID_ARGS when working_dir is not a directory', async () => {
-    const { deps, updateSession } = makeDeps([row('a')], { isDirectory: async () => false });
+    const { deps, updateSession } = makeDeps([row('a')], { resolveDirectory: async () => null });
     const res = await moveSessions(deps, { sessionIds: ['a'], target: toProject });
     expect(res).toMatchObject({ ok: false, errorCode: 'INVALID_ARGS' });
     expect(updateSession).not.toHaveBeenCalled();
@@ -92,11 +105,11 @@ describe('moveSessions', () => {
 
   it('rejects a relative working_dir before directory lookup', async () => {
     const { deps, updateSession } = makeDeps([row('a')]);
-    const isDirectory = vi.spyOn(deps, 'isDirectory');
+    const resolveDirectory = vi.spyOn(deps, 'resolveDirectory');
     const res = await moveSessions(deps, { sessionIds: ['a'], target: { kind: 'project', workingDir: 'relative' } });
     expect(res).toMatchObject({ ok: false, errorCode: 'INVALID_ARGS' });
     expect(updateSession).not.toHaveBeenCalled();
-    expect(isDirectory).not.toHaveBeenCalled();
+    expect(resolveDirectory).not.toHaveBeenCalled();
   });
 
   it.each<[string, Partial<SessionOpsRow>, Partial<SessionOperationsDeps>]>([
