@@ -12,6 +12,8 @@
 
 import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 import { isAbsolute } from 'node:path';
+
+import { normalizeWorkingDirForStorage } from '../../shared/workingDir.js';
 import type { MoveSessionsResult, SessionMoveTarget, SessionOpErrorCode, SessionOpItem } from '@cindy/mcps';
 
 import { isIpcError } from '../../shared/ipc-errors.js';
@@ -157,16 +159,24 @@ export async function moveSessions(
       return err('INVALID_ARGS', `working_dir 不是已存在的目录: ${params.target.workingDir}`);
     }
     // 审批发生在工具入参上(见 mcp-tool-approval-policy),而落库的必须是真实目录。
-    // 若两者不一致就**拒绝**而不是静默替换 —— 否则用户批准的是链接路径、
+    // 若两者不是同一个目录就**拒绝**而不是静默替换 —— 否则用户批准的是链接路径、
     // 实际授予的却是链接目标(恶意仓库可放一个指向 HOME 的 project 链接)。
     // 让调用方带着真实路径重来,批准的、存下的、日后生效的才是同一个目录。
-    if (canonical !== params.target.workingDir) {
+    //
+    // 比较必须在**存储规范化形式**上做:list_sessions 给出的 working_dir 是 DB 形式
+    // (Windows 上分隔符已被 normalizeWorkingDirForStorage 转成 `/`),而 realpath 返回
+    // 宿主形式的反斜杠路径,直接字符串比较会把 `C:/repo` 这种普通目录也误判成软链。
+    const canonicalKey = normalizeWorkingDirForStorage(canonical);
+    const requestedKey = normalizeWorkingDirForStorage(params.target.workingDir);
+    if (!canonicalKey || canonicalKey !== requestedKey) {
       return err(
         'INVALID_ARGS',
-        `working_dir 是软链或别名,实际指向 ${canonical}。请直接用该真实路径重试,` +
+        `working_dir 是软链或别名,实际指向 ${canonicalKey ?? canonical}。请直接用该真实路径重试,` +
           '以免审批看到的目录与实际生效的目录不一致。',
       );
     }
+    // 落库用规范化后的真实路径,保证同一个物理目录只有一种拼写。
+    params = { ...params, target: { kind: 'project', workingDir: canonicalKey } };
   }
   const loaded = await loadAll(deps, params.sessionIds);
   if (!Array.isArray(loaded)) return loaded;

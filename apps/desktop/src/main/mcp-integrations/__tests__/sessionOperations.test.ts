@@ -97,6 +97,20 @@ describe('moveSessions', () => {
     expect(updateSession).not.toHaveBeenCalled();
   });
 
+  it('compares realpath in storage-normalized form, not raw string', async () => {
+    // 同一个目录的不同拼写(这里是尾斜杠;Windows 上则是 `C:/repo` vs `C:\\repo`)
+    // 都要先过 normalizeWorkingDirForStorage 再比较,否则普通目录会被误判成软链。
+    const { deps, updateSession } = makeDeps([row('a')], {
+      resolveDirectory: async () => '/real/project',
+    });
+    const res = await moveSessions(deps, {
+      sessionIds: ['a'],
+      target: { kind: 'project', workingDir: '/real/project/' },
+    });
+    expect(res.ok).toBe(true);
+    expect(updateSession.mock.calls[0][1]).toMatchObject({ workingDir: '/real/project' });
+  });
+
   it('accepts a working_dir that is already canonical', async () => {
     const { deps, updateSession } = makeDeps([row('a')], {
       resolveDirectory: async (path: string) => path,

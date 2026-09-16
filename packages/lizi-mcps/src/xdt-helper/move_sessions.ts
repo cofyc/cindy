@@ -51,7 +51,7 @@ export interface MoveSessionsDeps {
 }
 
 const DESCRIPTION =
-  `批量把 ${BRAND_NAME} 历史对话/session 移动到某个项目目录(target_kind=project + working_dir),` +
+  `批量把 ${BRAND_NAME} 历史任务(session)移动到某个项目目录(target_kind=project + working_dir),` +
   '或移回不属于任何项目的「对话」(target_kind=dialogue)。等价于侧栏菜单的「移动到项目 / 移动到对话」,' +
   '主进程会同步搬迁 agent 转录目录并即时刷新侧栏。' +
   '限制:远程会话、运行中(含协同 worker 运行中)、被 IM 接管中、已归档、空草稿、review 会话都不能移动;' +
