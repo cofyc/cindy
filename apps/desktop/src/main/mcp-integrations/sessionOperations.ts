@@ -267,7 +267,9 @@ export async function exportSession(
     ? params.targetPath
     : `${params.targetPath}${shareFileExt}`;
   const parent = dirname(targetPath);
-  if (!(await deps.isDirectory(parent))) {
+  // 导出只要求父目录存在;这里不像 move 那样校验软链身份 —— 写出的是一个新文件,
+  // 不会成为日后会话的受信工作区。
+  if (!(await deps.resolveDirectory(parent))) {
     return err('INVALID_ARGS', `target_path 所在目录不存在: ${parent}`);
   }
   if (await deps.fileExists(targetPath)) {

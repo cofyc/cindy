@@ -266,14 +266,14 @@ describe('exportSession', () => {
       mediaMissing: 0,
       orcaWorkers: 0,
     }));
-    const isDirectory = vi.fn(async () => true);
-    const { deps } = makeDeps([row('a')], { exportShare, isDirectory });
+    const resolveDirectory = vi.fn(async (path: string) => path);
+    const { deps } = makeDeps([row('a')], { exportShare, resolveDirectory });
     const res = await exportSession(deps, { ...params, targetPath: '/tmp/out/x' }, '.cshare');
-    expect(isDirectory).toHaveBeenCalledWith('/tmp/out');
+    expect(resolveDirectory).toHaveBeenCalledWith('/tmp/out');
     expect(exportShare).toHaveBeenCalledWith({ sessionId: 'a', targetPath: '/tmp/out/x.cshare', excludeMedia: false });
     expect(res).toMatchObject({ ok: true, filePath: '/tmp/out/x.cshare', fidelity: 'full' });
 
-    const { deps: bad } = makeDeps([row('a')], { isDirectory: async () => false });
+    const { deps: bad } = makeDeps([row('a')], { resolveDirectory: async () => null });
     expect(await exportSession(bad, { ...params, targetPath: '/nope/x' }, '.cshare')).toMatchObject({
       ok: false,
       errorCode: 'INVALID_ARGS',
