@@ -10,7 +10,8 @@
  *  3. host 侧走 sessions:update 业务体写 status=deleted(软删除,与 GUI 同一条路径:
  *     worktree 回收、运行时清理、sessions:patched 广播),运行态在写锁内复核。
  *
- * 守卫(host 逐条校验,任一不过整批不写):远程会话、伙伴 / 协同 worker 会话、运行中
+ * 守卫(host 逐条校验,预检任一不过则整批不写;逐个应用阶段失败时 data.items 为已删部分):
+ * 远程会话、伙伴 / 协同 worker 会话、运行中
  * (含协同 worker 运行中)、被 IM 接管中不允许;已删除的直接 PRECONDITION_FAILED;已归档
  * 允许(与 GUI 一致)。工具层不允许删除当前 session 自己。
  */
@@ -79,8 +80,12 @@ const DESCRIPTION =
   '真删调用会再经用户在界面上确认一次,预览后 worktree 状态变化也会被拒绝并要求重新 dry_run。' +
   '限制:远程会话、伙伴(Bot)/协同 worker 会话、运行中(含协同 worker 运行中)、被 IM 接管中不能删除;不能删除当前 session 自己。' +
   '想只是整理侧栏请优先用 archive_sessions。' +
-  '失败码: NOT_FOUND(某些 id 不存在,整批不写) / PRECONDITION_FAILED(被守卫拦下、已删除或预览状态已变化,整批不写) / ' +
-  'INVALID_ARGS(含 token 不匹配) / NO_SESSION_CONTEXT / HOST_NOT_READY / INTERNAL(途中失败,data.items 为已删部分)。';
+  '失败码: NOT_FOUND(某些 id 不存在) / PRECONDITION_FAILED(被守卫拦下、已删除或预览状态已变化) / ' +
+  'INVALID_ARGS(含 token 不匹配) / NO_SESSION_CONTEXT / HOST_NOT_READY / INTERNAL。' +
+  '**部分成功**:批量预检不过时一条都不会删(data.items 为空);预检通过后逐个应用,' +
+  '若中途某个任务在写锁内复核失败(重新进入运行中 / 被 IM 接管 / 被并发归档删除),' +
+  '错误码可能是 PRECONDITION_FAILED / NOT_FOUND / INTERNAL,此时 data.items 是**已经删除**的部分 —— ' +
+  '请按 data.items 如实汇报,不要把整批当作未执行去重试(重试会带上已删除的 id)。';
 
 function toPreviewPayload(item: DeleteSessionPreviewItem): Record<string, unknown> {
   return {
