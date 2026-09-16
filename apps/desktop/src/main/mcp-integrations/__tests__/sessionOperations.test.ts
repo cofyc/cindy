@@ -111,6 +111,17 @@ describe('moveSessions', () => {
     expect(updateSession.mock.calls[0][1]).toMatchObject({ workingDir: '/real/project' });
   });
 
+  it('accepts a case-only difference on case-insensitive filesystems', async () => {
+    // macOS/Windows 默认大小写不敏感:/Users/Me/repo 与 /users/me/repo 是同一个目录。
+    const insensitive = process.platform === 'win32' || process.platform === 'darwin';
+    const { deps } = makeDeps([row('a')], { resolveDirectory: async () => '/Users/Me/repo' });
+    const res = await moveSessions(deps, {
+      sessionIds: ['a'],
+      target: { kind: 'project', workingDir: '/users/me/repo' },
+    });
+    expect(res.ok).toBe(insensitive);
+  });
+
   it('accepts a working_dir that is already canonical', async () => {
     const { deps, updateSession } = makeDeps([row('a')], {
       resolveDirectory: async (path: string) => path,

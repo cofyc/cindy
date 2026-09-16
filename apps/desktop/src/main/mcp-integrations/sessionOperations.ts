@@ -146,6 +146,18 @@ async function lateGuard(
   return null;
 }
 
+/**
+ * 两个已规范化的路径是否指向同一个目录。Windows 与默认配置的 macOS 文件系统大小写不敏感,
+ * `c:/users/me/repo` 与 realpath 给出的 `C:/Users/Me/repo` 是同一个目录,不能判成软链;
+ * Linux 大小写敏感,必须逐字比较。真正解析到别处的软链在两种平台上都仍然会被拒绝。
+ */
+function samePathIdentity(a: string, b: string | null): boolean {
+  if (b == null) return false;
+  if (a === b) return true;
+  const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin';
+  return caseInsensitive && a.toLowerCase() === b.toLowerCase();
+}
+
 export async function moveSessions(
   deps: SessionOperationsDeps,
   params: { sessionIds: string[]; target: SessionMoveTarget },
@@ -168,7 +180,7 @@ export async function moveSessions(
     // 宿主形式的反斜杠路径,直接字符串比较会把 `C:/repo` 这种普通目录也误判成软链。
     const canonicalKey = normalizeWorkingDirForStorage(canonical);
     const requestedKey = normalizeWorkingDirForStorage(params.target.workingDir);
-    if (!canonicalKey || canonicalKey !== requestedKey) {
+    if (!canonicalKey || !samePathIdentity(canonicalKey, requestedKey)) {
       return err(
         'INVALID_ARGS',
         `working_dir 是软链或别名,实际指向 ${canonicalKey ?? canonical}。请直接用该真实路径重试,` +
