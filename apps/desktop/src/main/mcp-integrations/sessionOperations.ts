@@ -301,7 +301,10 @@ async function forkSessionLocked(
         return err('INTERNAL', message);
     }
   }
-  const [forked] = await deps.loadSessions([forkedId]);
+  // fork 已经建好并广播,是不可逆副作用。这次补充读取只为拿标题等展示字段,
+  // 失败(瞬时 DB 错误 / owner 切换)不能让整个调用变成 INTERNAL —— 调用方会据此重试,
+  // 再建一条重复任务。读不到就退回下面已有的兜底投影。
+  const [forked] = await deps.loadSessions([forkedId]).catch(() => []);
   return {
     ok: true,
     session: forked

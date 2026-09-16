@@ -293,6 +293,21 @@ describe('forkSession', () => {
     });
   });
 
+  it('still reports success when the post-fork read fails', async () => {
+    // fork 已建好并广播;补充读取失败若冒泡成 INTERNAL,调用方重试会再建一条重复任务。
+    let loads = 0;
+    const base = row('a');
+    const { deps } = makeDeps([base], {
+      loadSessions: async (ids) => {
+        loads += 1;
+        if (loads > 2) throw new Error('transient db error');
+        return ids.flatMap((id) => (id === 'a' ? [base] : []));
+      },
+    });
+    const res = await forkSession(deps, { sessionId: 'a', messageId: 'm' });
+    expect(res).toMatchObject({ ok: true, session: { sessionId: 'forked' } });
+  });
+
   it('refuses to fork a source deleted inside the session lock', async () => {
     // forkSessionAtMessage 只校验源行存在,软删除会保留行 —— 预检通过后被并发删除时
     // 必须在锁内复核拦下,否则会从已删除任务派生出 active 子任务。
