@@ -10,6 +10,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
+import { projectPersistedAgentFacingUserText } from '@cindy/maker-shared/agent-input-projection';
 import { joinChatQuoteTextSegments, parseChatQuoteSegments } from '@cindy/maker-shared/chat-quotes';
 import type { ForkSessionResult, MoveSessionsResult, SessionMoveTarget } from '@cindy/mcps';
 
@@ -73,6 +74,11 @@ export function messageTextForDraft(content: unknown): string {
   if (typeof content !== 'string') return '';
   const trimmed = content.trim();
   if (!trimmed) return '';
+  // envelope(带 quotesEncoded / agentReferences 等 composer 引用元数据)统一走仓内既有的
+  // agent-facing 投影:它会剥掉引用私有标记,并把消息/任务/项目/浏览器等引用还原成可读正文,
+  // 而不是留下不透明的 cindy:// 文本。非 envelope 形态再退回下面的按块取文本。
+  const projected = projectPersistedAgentFacingUserText(trimmed);
+  if (projected !== null) return projected;
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);

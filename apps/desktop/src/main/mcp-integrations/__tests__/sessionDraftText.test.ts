@@ -36,6 +36,17 @@ describe('messageTextForDraft', () => {
     expect(out).toContain('my question');
   });
 
+  it('keeps composer reference context instead of leaving opaque cindy:// text', () => {
+    // envelope 同时带 text 与 agentReferences 时,直接回传 text 会丢掉引用解析所需的元数据。
+    const raw = JSON.stringify({
+      text: 'see cindy://session/abc for context',
+      agentReferences: [{ kind: 'session', id: 'abc', title: 'Some task' }],
+    });
+    const out = messageTextForDraft(raw);
+    expect(out).toBeTruthy();
+    expect(typeof out).toBe('string');
+  });
+
   it('falls back to the raw string when the content is not JSON', () => {
     expect(messageTextForDraft('hello')).toBe('hello');
   });
