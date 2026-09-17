@@ -111,15 +111,17 @@ describe('moveSessions', () => {
     expect(updateSession.mock.calls[0][1]).toMatchObject({ workingDir: '/real/project' });
   });
 
-  it('accepts a case-only difference on case-insensitive filesystems', async () => {
-    // macOS/Windows 默认大小写不敏感:/Users/Me/repo 与 /users/me/repo 是同一个目录。
-    const insensitive = process.platform === 'win32' || process.platform === 'darwin';
-    const { deps } = makeDeps([row('a')], { resolveDirectory: async () => '/Users/Me/repo' });
+  it('rejects a case-only difference rather than guessing volume case sensitivity', async () => {
+    // macOS 可挂载大小写敏感卷、Windows 目录也可开启大小写敏感,届时 repo 与 Repo 是两个目录;
+    // 按平台折叠大小写会让软链绕过校验,所以一律要求逐字相同,并在消息里给出真实路径。
+    const { deps, updateSession } = makeDeps([row('a')], { resolveDirectory: async () => '/Users/Me/repo' });
     const res = await moveSessions(deps, {
       sessionIds: ['a'],
       target: { kind: 'project', workingDir: '/users/me/repo' },
     });
-    expect(res.ok).toBe(insensitive);
+    expect(res).toMatchObject({ ok: false, errorCode: 'INVALID_ARGS' });
+    expect(res.ok === false && res.message).toContain('/Users/Me/repo');
+    expect(updateSession).not.toHaveBeenCalled();
   });
 
   it('accepts a working_dir that is already canonical', async () => {
