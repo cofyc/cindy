@@ -8842,6 +8842,7 @@ export default function SessionScreen() {
               <OrcaWorkerStatusCard
                 leadSessionId={sessionId}
                 deviceId={deviceId}
+                accountScope={auth.user?.id ?? 'anonymous'}
                 maker={maker}
                 onOpenWorker={openWorkerSession}
               />
