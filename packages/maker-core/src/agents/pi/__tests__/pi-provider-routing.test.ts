@@ -1617,6 +1617,130 @@ describe("Pi provider-aware model routing", () => {
     await handle.close();
   });
 
+  it("reloads models.json before set_model when a gateway model appears after session start", async () => {
+    const agent = new PiAgent({
+      auth: {
+        getState: async () => ({
+          authenticated: true,
+          identity: "user",
+          authSource: "oauth" as const,
+        }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({ CINDY_PI_API_KEY: "gateway-key" }),
+      },
+      runtimeConfig: { endpoint: "http://127.0.0.1:9" },
+      binaryPath: path.join(agentHome, "pi"),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [
+          {
+            id: "local-model",
+            displayName: "Local",
+            contextWindow: 128_000,
+            efforts: [],
+            defaultEffort: null,
+          },
+        ],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelApi: () => "openai-responses",
+    });
+    const handle = await agent.startSession({
+      sessionId: "late-gateway-grok",
+      workingDir: cwd,
+      model: "local-model",
+      providerId: "xd",
+    });
+    agent.capabilities.availableModels.push({
+      id: "x-ai-grok/grok-4.7",
+      displayName: "Grok 4.7",
+      contextWindow: 500_000,
+      efforts: ["low", "medium", "high", "xhigh"],
+      defaultEffort: "medium",
+    });
+    captured.requests.length = 0;
+    await handle.setModel!("x-ai-grok/grok-4.7", { providerId: "xd" });
+    const reloadAt = captured.requests.findIndex((request) => request.type === "switch_session");
+    const setAt = captured.requests.findIndex((request) => request.type === "set_model");
+    expect(reloadAt).toBeGreaterThanOrEqual(0);
+    expect(setAt).toBeGreaterThan(reloadAt);
+    expect(captured.requests[setAt]).toEqual({
+      type: "set_model",
+      provider: "cindy",
+      modelId: "x-ai-grok/grok-4.7",
+    });
+    const models = JSON.parse(
+      readFileSync(path.join(captured.env.PI_CODING_AGENT_DIR as string, "models.json"), "utf8"),
+    ) as { providers: Record<string, { models: Array<{ id: string }> }> };
+    expect(models.providers.cindy?.models.map((entry) => entry.id)).toContain("x-ai-grok/grok-4.7");
+    await handle.close();
+  });
+
+  it("restores models.json when a late gateway model cannot be reloaded", async () => {
+    const agent = new PiAgent({
+      auth: {
+        getState: async () => ({
+          authenticated: true,
+          identity: "user",
+          authSource: "oauth" as const,
+        }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({ CINDY_PI_API_KEY: "gateway-key" }),
+      },
+      runtimeConfig: { endpoint: "http://127.0.0.1:9" },
+      binaryPath: path.join(agentHome, "pi"),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [
+          {
+            id: "local-model",
+            displayName: "Local",
+            contextWindow: 128_000,
+            efforts: [],
+            defaultEffort: null,
+          },
+        ],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelApi: () => "openai-responses",
+    });
+    const handle = await agent.startSession({
+      sessionId: "late-gateway-grok-reload-fail",
+      workingDir: cwd,
+      model: "local-model",
+      providerId: "xd",
+    });
+    agent.capabilities.availableModels.push({
+      id: "x-ai-grok/grok-4.7",
+      displayName: "Grok 4.7",
+      contextWindow: 500_000,
+      efforts: [],
+      defaultEffort: null,
+    });
+    captured.requestHandler = async (command) => {
+      if (command.type === "switch_session") return { success: false, error: "reload failed" };
+      if (command.type === "get_state") {
+        return {
+          success: true,
+          data: { sessionFile: "/mock/s.jsonl", model: { contextWindow: 200_000 } },
+        };
+      }
+      return { success: true, data: {} };
+    };
+    captured.requests.length = 0;
+    await expect(
+      handle.setModel!("x-ai-grok/grok-4.7", { providerId: "xd" }),
+    ).rejects.toThrow(/failed to reload models after catalog update/);
+    expect(captured.requests.some((request) => request.type === "set_model")).toBe(false);
+    const models = JSON.parse(
+      readFileSync(path.join(captured.env.PI_CODING_AGENT_DIR as string, "models.json"), "utf8"),
+    ) as { providers: Record<string, { models: Array<{ id: string }> }> };
+    expect(models.providers.cindy?.models.map((entry) => entry.id)).not.toContain("x-ai-grok/grok-4.7");
+    await handle.close();
+  });
+
   it("keeps the live context window when a late catalog reload rewrites settings", async () => {
     const xaiProvider = {
       id: "xai",

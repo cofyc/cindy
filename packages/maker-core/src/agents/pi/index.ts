@@ -6294,6 +6294,83 @@ export class PiAgent extends BaseAgent {
         );
       }
       assertGatewayProtocolForModel(model, requestedProviderId);
+      // Pi 的 set_model 只查进程启动时载入的 models.json。网关目录后来才出现的型号
+      // （例如 x-ai-grok/grok-4.7）不在这份快照里，会报 Model not found: cindy/<id>。
+      // 先按当前 capabilities 重写 models.json，再 switch_session 让 Pi 重载，然后才 set_model。
+      // 重载未确认时把文件退回启动快照，避免磁盘已经是新目录、进程仍是旧快照。
+      const catalogHasGatewayModel =
+        this.capabilities.availableModels.some((entry) => entry.id === model)
+        || retainedRuntimeModel?.id === model;
+      if (provider === PI_PROVIDER_ID && !gatewayApiByModel.has(model) && catalogHasGatewayModel) {
+        if (!sdkSessionId) {
+          throw new Error(
+            `pi: model '${model}' is not in this session's startup catalog; restart the Pi session to use it.`,
+          );
+        }
+        const modelsJsonPath = joinRemotePosixPath(configHome, 'models.json');
+        const settingsJsonPath = joinRemotePosixPath(configHome, 'settings.json');
+        const readCatalogText = (file: string): Promise<string> =>
+          fileOps ? fileOps.readFile(file, 16 * 1024 * 1024) : fs.readFile(file, 'utf8');
+        const writeCatalogText = (file: string, content: string): Promise<void> =>
+          fileOps
+            ? fileOps.writeFile(file, content)
+            : fs.writeFile(file, content, { mode: 0o600 });
+        const previousModels = await readCatalogText(modelsJsonPath);
+        const previousSettings = await readCatalogText(settingsJsonPath);
+        const restoreCatalogFiles = async (): Promise<void> => {
+          await writeCatalogText(modelsJsonPath, previousModels);
+          await writeCatalogText(settingsJsonPath, previousSettings);
+        };
+        let written: Awaited<ReturnType<PiAgent['writeModelsJson']>>;
+        try {
+          written = await this.writeModelsJson(
+            configHome,
+            nativeProviders,
+            retainedRuntimeModel,
+            authProviderId,
+            {
+              remote,
+              fileOps,
+              contextWindow: ctx.contextWindow || startupContextWindow,
+              workingContextWindow: ctx.workingContextWindow,
+              piCompactionPct: sessionPiAutoCompactPct,
+              packages: nativePackagePaths,
+              disabledSkills: disabledSkillLaunch,
+            },
+          );
+        } catch (err) {
+          await restoreCatalogFiles().catch(() => undefined);
+          throw err;
+        }
+        if (!written.gatewayApiByModel.has(model)) {
+          await restoreCatalogFiles();
+          throw new Error(
+            `pi: model '${model}' is not in the Cindy Gateway catalog for this session; restart the Pi session after the catalog refresh.`,
+          );
+        }
+        let reloaded;
+        try {
+          reloaded = await proc.request({
+            type: 'switch_session',
+            sessionPath: sdkSessionId,
+          });
+        } catch (err) {
+          await restoreCatalogFiles().catch(() => undefined);
+          return await terminateUnconfirmedCatalogReload(err);
+        }
+        if (!reloaded.success) {
+          await restoreCatalogFiles();
+          throw new Error(
+            `pi: failed to reload models after catalog update: ${reloaded.error ?? 'unknown'}`,
+          );
+        }
+        gatewayApiByModel.clear();
+        for (const [key, value] of written.gatewayApiByModel) gatewayApiByModel.set(key, value);
+        gatewayImageInputByModel.clear();
+        for (const [key, value] of written.gatewayImageInputByModel) {
+          gatewayImageInputByModel.set(key, value);
+        }
+      }
       // effort 能力校验必须排在写路由快照**之前**:它会抛错中止本次切换,而快照一旦落盘就
       // 指向了新 provider —— 那正是父子路由分叉的形状(upstream #1451 与本 PR 的合并点)。
       const nextEffortSnapshot = resolveStartupEffortSnapshot(provider, model);
