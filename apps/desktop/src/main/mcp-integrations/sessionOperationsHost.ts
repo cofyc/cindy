@@ -8,12 +8,15 @@
 
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
+import type { SetSessionsPinnedResult } from '@cindy/mcps';
+
 import { bindingStore } from '../im/binding.js';
 import { getDbClient, tryGetDbClient } from '../localDb/client/current.js';
 import { updateSessionInDb } from '../localDb/ipc/sessions.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
 import {
+  setSessionsPinned,
   type SessionOperationsDeps,
   type SessionOpsRow,
 } from './sessionOperations.js';
@@ -29,6 +32,7 @@ const ROW_COLUMNS = {
   orcaRole: sessions.orcaRole,
   parentSessionId: sessions.parentSessionId,
   forkedAtMessageId: sessions.forkedAtMessageId,
+  pinnedAt: sessions.pinnedAt,
   createdAt: sessions.createdAt,
   messageCount: sql<number>`(select count(*) from messages where messages.session_id = ${sessions.id})`,
 };
@@ -44,6 +48,7 @@ function toRow(row: {
   orcaRole: string | null;
   parentSessionId: string | null;
   forkedAtMessageId: string | null;
+  pinnedAt: number | null;
   createdAt: number;
   messageCount: number;
 }): SessionOpsRow {
@@ -136,4 +141,11 @@ export function createSessionOpsGuard(isTurnRunning: (sessionId: string) => bool
         )
       : Promise.resolve(notReady);
   return { deps, guarded };
+}
+
+/** cindy_helper pin_sessions / unpin_sessions 的 host 回调。 */
+export function createSetSessionsPinned(isTurnRunning: (sessionId: string) => boolean) {
+  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  return (params: { sessionIds: string[]; pinned: boolean }): Promise<SetSessionsPinnedResult> =>
+    guarded(() => setSessionsPinned(deps, params));
 }

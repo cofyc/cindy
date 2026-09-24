@@ -12,7 +12,7 @@
  * (docs/dev-rules/engineering-conventions.md §3)。
  */
 
-import type { SessionOpErrorCode, SessionOpItem } from '@cindy/mcps';
+import type { SessionOpErrorCode, SessionOpItem, SetSessionsPinnedResult } from '@cindy/mcps';
 import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 
 import { isIpcError } from '../../shared/ipc-errors.js';
@@ -28,6 +28,7 @@ export interface SessionOpsRow {
   orcaRole: 'lead' | 'worker' | null;
   parentSessionId: string | null;
   forkedAtMessageId: string | null;
+  pinnedAt: number | null;
   createdAt: number;
   messageCount: number;
 }
@@ -129,13 +130,48 @@ export async function mutationGuard(
 export async function lateGuard(
   deps: SessionOperationsDeps,
   sessionId: string,
-  options: { allowArchived: boolean },
+  options: { allowArchived: boolean; checkRuntime?: boolean },
 ): Promise<string | null> {
   const [fresh] = await deps.loadSessions([sessionId]);
   if (!fresh) return '会话已不存在';
   if (fresh.status === 'deleted') return '会话已在此期间被删除';
   if (!options.allowArchived && fresh.status === 'archived') return '会话已在此期间被归档';
-  if (await isRunning(deps, fresh)) return '会话在写入前重新进入运行中';
-  if (deps.isImAttached(fresh.id)) return '会话在写入前被 IM 接管';
+  if (options.checkRuntime !== false && (await isRunning(deps, fresh))) return '会话在写入前重新进入运行中';
+  if (options.checkRuntime !== false && deps.isImAttached(fresh.id)) return '会话在写入前被 IM 接管';
   return null;
+}
+
+export async function setSessionsPinned(
+  deps: SessionOperationsDeps,
+  params: { sessionIds: string[]; pinned: boolean },
+): Promise<SetSessionsPinnedResult> {
+  const loaded = await loadAll(deps, params.sessionIds);
+  if (!Array.isArray(loaded)) return loaded;
+  // 置顶只写本地 pinnedAt 元数据,SSH 远程会话在 GUI 同样可置顶(patchMeta),这里不拦。
+  // 伙伴(Bot)会话与 Orca worker 不在侧栏置顶区展示,拒绝以免写入无人可见的状态。
+  for (const row of loaded) {
+    if (row.status !== 'active') return err('PRECONDITION_FAILED', `${row.id}: 会话已归档或删除,不能置顶`);
+    if (row.source === 'bot') return err('PRECONDITION_FAILED', `${row.id}: 伙伴(Bot)会话不能置顶`);
+    if (row.orcaRole === 'worker') return err('PRECONDITION_FAILED', `${row.id}: 协同 worker 会话不能置顶`);
+  }
+  const changed: SessionOpItem[] = [];
+  for (const row of loaded) {
+    // 已经处于目标状态的跳过:重复写 pinnedAt 会打乱置顶排序,还会再触发一次强制摘要生成
+    // (updateSessionInDb 在 pinnedAt 落非空时 force 生成)。与 GUI 的「置顶/取消置顶」一致,
+    // 也让重试保持幂等 —— 未发生变化的不计入 changed。
+    if ((row.pinnedAt != null) === params.pinned) continue;
+    try {
+      // 终态 / 运行态 / IM 接管的复核放在 updateSessionInDb 写锁内(beforeWrite):预检后被并发
+      // 归档或删除的会话不会再被写入 pinnedAt 并报成功。
+      await deps.updateSession(row.id, { pinnedAt: params.pinned ? new Date().toISOString() : null }, {
+        beforeWrite: () => lateGuard(deps, row.id, { allowArchived: false, checkRuntime: false }),
+      });
+      changed.push(toItem(row));
+    } catch (e) {
+      // 保留映射后的业务错误码,只有未知异常才是 INTERNAL;已完成的 changed 一并带回。
+      const mapped = mapIpcError(e);
+      return { ...mapped, message: `${row.id}: ${mapped.message}`, changed } as SetSessionsPinnedResult;
+    }
+  }
+  return { ok: true, changed };
 }
