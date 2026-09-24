@@ -7,10 +7,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  getSessionBranches,
   lateGuard,
   loadAll,
   mapIpcError,
   mutationGuard,
+  openSessionInNewWindow,
   type SessionOperationsDeps,
   type SessionOpsRow,
 } from '../sessionOperations.js';
@@ -54,6 +56,7 @@ function makeDeps(rows: SessionOpsRow[], overrides: Partial<SessionOperationsDep
     isTurnRunning: () => false,
     isImAttached: () => false,
     updateSession,
+    openInNewWindow: vi.fn(),
     ...overrides,
   };
   return { deps, updateSession };
@@ -151,5 +154,100 @@ describe('mapIpcError', () => {
 
   it('falls back to INTERNAL for an unknown throw', () => {
     expect(mapIpcError(new Error('boom'))).toMatchObject({ ok: false, errorCode: 'INTERNAL' });
+  });
+});
+
+describe('openSessionInNewWindow', () => {
+  it('opens existing sessions and rejects deleted ones', async () => {
+    const { deps } = makeDeps([row('a'), row('d', { status: 'deleted' })]);
+    expect(await openSessionInNewWindow(deps, { sessionId: 'a' })).toMatchObject({ ok: true, sessionId: 'a' });
+    expect(deps.openInNewWindow).toHaveBeenCalledWith('a');
+    expect(await openSessionInNewWindow(deps, { sessionId: 'd' })).toMatchObject({ ok: false, errorCode: 'PRECONDITION_FAILED' });
+    expect(await openSessionInNewWindow(deps, { sessionId: 'x' })).toMatchObject({ ok: false, errorCode: 'NOT_FOUND' });
+  });
+
+  it('refuses to open a Bot session as an ordinary task window', async () => {
+    // 副窗只经 resolveSessionRoute 解析 Orca 身份,伙伴会话会落到 /cc-agent/ 而非 /bots/。
+    const { deps } = makeDeps([row('b', { source: 'bot' })]);
+    expect(await openSessionInNewWindow(deps, { sessionId: 'b' })).toMatchObject({
+      ok: false,
+      errorCode: 'PRECONDITION_FAILED',
+    });
+    expect(deps.openInNewWindow).not.toHaveBeenCalled();
+  });
+});
+
+describe('getSessionBranches', () => {
+  it('walks up to the root and collects all descendants', async () => {
+    const { deps } = makeDeps([
+      row('root'),
+      row('c1', { parentSessionId: 'root', forkedAtMessageId: 'm1' }),
+      row('c2', { parentSessionId: 'root' }),
+      row('gc', { parentSessionId: 'c1' }),
+      row('other'),
+    ]);
+    const res = await getSessionBranches(deps, { sessionId: 'gc' });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.rootSessionId).toBe('root');
+      expect(res.family.map((f) => f.sessionId).sort()).toEqual(['c1', 'c2', 'gc', 'root']);
+      expect(res.family.find((f) => f.sessionId === 'c1')).toMatchObject({ parentSessionId: 'root', forkedAtMessageId: 'm1' });
+    }
+  });
+
+  it('excludes Bot delegation children but keeps forks that have no message anchor', async () => {
+    // botDelegationService 给委派子会话写 sessions.parentSessionId(botDelegationService.ts:806),
+    // 那些会话 source='bot',侧栏不展示;而 forkSessionStripEncrypted 建的分支
+    // 是 parentSessionId 有值、forkedAtMessageId 为空的合法分支,必须留下。
+    const { deps } = makeDeps([
+      row('root'),
+      row('anchored', { parentSessionId: 'root', forkedAtMessageId: 'm1' }),
+      row('stripFork', { parentSessionId: 'root' }),
+      row('delegated', { parentSessionId: 'root', source: 'bot' }),
+      row('worker', { parentSessionId: 'root', orcaRole: 'worker' }),
+    ]);
+    const res = await getSessionBranches(deps, { sessionId: 'root' });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.family.map((f) => f.sessionId).sort()).toEqual(['anchored', 'root', 'stripFork']);
+    }
+  });
+
+  it('refuses a Bot or worker session as the family entry point', async () => {
+    // 否则:有可见祖先时入口会被 BFS 过滤掉(成功结果里没有请求的 id);
+    // 没有可见父节点时入口又会自己当根混进家族 —— 两种都与契约矛盾。
+    const { deps } = makeDeps([
+      row('root'),
+      row('botChild', { parentSessionId: 'root', source: 'bot' }),
+      row('lonelyWorker', { orcaRole: 'worker' }),
+    ]);
+    expect(await getSessionBranches(deps, { sessionId: 'botChild' })).toMatchObject({
+      ok: false,
+      errorCode: 'PRECONDITION_FAILED',
+    });
+    expect(await getSessionBranches(deps, { sessionId: 'lonelyWorker' })).toMatchObject({
+      ok: false,
+      errorCode: 'PRECONDITION_FAILED',
+    });
+  });
+
+  it('refuses a soft-deleted session as the family entry point', async () => {
+    const { deps } = makeDeps([row('gone', { status: 'deleted' })]);
+    expect(await getSessionBranches(deps, { sessionId: 'gone' })).toMatchObject({
+      ok: false,
+      errorCode: 'PRECONDITION_FAILED',
+    });
+  });
+
+  it('drops soft-deleted sessions and their descendants from the family', async () => {
+    const { deps } = makeDeps([
+      row('root'),
+      row('keep', { parentSessionId: 'root' }),
+      row('gone', { parentSessionId: 'root', status: 'deleted' }),
+      row('orphan', { parentSessionId: 'gone' }),
+    ]);
+    const res = await getSessionBranches(deps, { sessionId: 'keep' });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.family.map((f) => f.sessionId).sort()).toEqual(['keep', 'root']);
   });
 });

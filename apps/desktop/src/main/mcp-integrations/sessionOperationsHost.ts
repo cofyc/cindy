@@ -6,14 +6,20 @@
  * (mcp-providers 不能反向 import maker-host/index,会成环)。
  */
 
+import { BrowserWindow } from 'electron';
 import { and, eq, inArray, sql } from 'drizzle-orm';
+
+import type { GetSessionBranchesResult, OpenSessionInNewWindowResult } from '@cindy/mcps';
 
 import { bindingStore } from '../im/binding.js';
 import { getDbClient, tryGetDbClient } from '../localDb/client/current.js';
 import { updateSessionInDb } from '../localDb/ipc/sessions.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
+import { openSessionInNewWindow as openSecondaryWindow } from '../secondary-windows.js';
 import {
+  getSessionBranches,
+  openSessionInNewWindow,
   type SessionOperationsDeps,
   type SessionOpsRow,
 } from './sessionOperations.js';
@@ -111,6 +117,10 @@ export function createSessionOperationsDeps(
       const run = () => updateSessionInDb(sessionId, patch, undefined, guard);
       return guard ? bindingStore.runExclusive(run) : run();
     },
+    openInNewWindow: (sessionId) => {
+      const anchor = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null;
+      openSecondaryWindow(sessionId, anchor);
+    },
   };
 }
 
@@ -136,4 +146,18 @@ export function createSessionOpsGuard(isTurnRunning: (sessionId: string) => bool
         )
       : Promise.resolve(notReady);
   return { deps, guarded };
+}
+
+/** cindy_helper open_session_in_new_window 的 host 回调。 */
+export function createOpenSessionInNewWindow(isTurnRunning: (sessionId: string) => boolean) {
+  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  return (params: { sessionId: string }): Promise<OpenSessionInNewWindowResult> =>
+    guarded(() => openSessionInNewWindow(deps, params));
+}
+
+/** cindy_helper get_session_branches 的 host 回调。 */
+export function createGetSessionBranches(isTurnRunning: (sessionId: string) => boolean) {
+  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  return (params: { sessionId: string }): Promise<GetSessionBranchesResult> =>
+    guarded(() => getSessionBranches(deps, params));
 }
