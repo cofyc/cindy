@@ -14,6 +14,7 @@ export type {
   SessionOpResult,
 } from './_session_ops.js';
 export { hostErrorPayload, sessionOpItemToPayload } from './_session_ops.js';
+export { registerForkSessionTool, type ForkSessionDeps, type ForkSessionResult } from './fork_session.js';
 export { registerGetCapabilitiesTool } from './get_capabilities.js';
 export { registerGrokLoginTools, type GrokLoginCallbacks, type GrokLoginState } from './grok_login.js';
 export { registerSkillhubTools, type SkillhubAgentCallback, type SkillhubAgentRequest } from './skillhub.js';

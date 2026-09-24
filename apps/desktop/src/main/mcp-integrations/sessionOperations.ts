@@ -12,7 +12,7 @@
  * (docs/dev-rules/engineering-conventions.md §3)。
  */
 
-import type { SessionOpErrorCode, SessionOpItem } from '@cindy/mcps';
+import type { ForkSessionResult, SessionOpErrorCode, SessionOpItem } from '@cindy/mcps';
 import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 
 import { isIpcError } from '../../shared/ipc-errors.js';
@@ -53,6 +53,19 @@ export interface SessionOperationsDeps {
     patch: Record<string, unknown>,
     hooks?: { beforeWrite?: () => Promise<string | null> },
   ): Promise<unknown>;
+  /**
+   * 在该会话的路由锁内执行 task。fork 用它把「复核源会话未被删除」与 forkAtMessage
+   * 放进同一串行区间 —— forkSessionAtMessage 自身不取任何锁,且只校验源行存在
+   * (软删除会保留行),不这样做会从已删除任务派生出 active 子任务。
+   */
+  withSessionLock<T>(sessionId: string, task: () => Promise<T>): Promise<T>;
+  /** history 消息 id → fork 所需的 messages.clientId 及该消息的角色与文本;不存在返回 null。 */
+  resolveMessageClientId(
+    sessionId: string,
+    messageId: string,
+  ): Promise<{ clientId: string; role: string; text: string; rewound?: boolean } | null>;
+  /** maker-orchestration/fork 的 forkSessionAtMessage + 新会话广播。 */
+  forkAtMessage(sessionId: string, messageClientId: string): Promise<{ id: string }>;
 }
 
 type Err<E extends string> = { ok: false; errorCode: E; message: string };
@@ -138,4 +151,82 @@ export async function lateGuard(
   if (await isRunning(deps, fresh)) return '会话在写入前重新进入运行中';
   if (deps.isImAttached(fresh.id)) return '会话在写入前被 IM 接管';
   return null;
+}
+
+/**
+ * 在某条消息处分叉出新会话(GUI Fork 同款):remote / deleted 拒绝,消息 id 先换算成
+ * clientId,fork 编排层的错误码按工具契约映射。
+ */
+export async function forkSession(
+  deps: SessionOperationsDeps,
+  params: { sessionId: string; messageId: string },
+): Promise<ForkSessionResult> {
+  const loaded = await loadAll(deps, [params.sessionId]);
+  if (!Array.isArray(loaded)) return loaded;
+  const [row] = loaded;
+  if (row.status === 'deleted') return err('PRECONDITION_FAILED', `${row.id}: 会话已删除`);
+  if (row.remoteHostId) return err('PRECONDITION_FAILED', `${row.id}: 远程会话不支持在本地 fork`);
+  return deps.withSessionLock(row.id, async () => {
+    // 锁内重新确认源会话仍未被删除:软删除保留行与消息,forkSessionAtMessage 只查
+    // "行是否存在",单靠上面的预检会从已删除任务派生出 active 子任务。
+    const [fresh] = await deps.loadSessions([row.id]);
+    if (!fresh) return err('NOT_FOUND', `${row.id}: 会话已不存在`);
+    if (fresh.status === 'deleted') return err('PRECONDITION_FAILED', `${row.id}: 会话已在此期间被删除`);
+    return forkSessionLocked(deps, fresh, params.messageId);
+  });
+}
+
+async function forkSessionLocked(
+  deps: SessionOperationsDeps,
+  row: SessionOpsRow,
+  messageId: string,
+): Promise<ForkSessionResult> {
+  const target = await deps.resolveMessageClientId(row.id, messageId);
+  if (!target) return err('NOT_FOUND', `消息 ${messageId} 不存在于 ${row.id}`);
+  // 已 Rewind 的消息不会被复制进新任务,分叉会静默锚到更早的 turn —— 明确拒绝而不是假成功。
+  if (target.rewound) {
+    return err('PRECONDITION_FAILED', `消息 ${messageId} 已被 Rewind,不能作为分叉点`);
+  }
+  let forkedId: string;
+  try {
+    forkedId = (await deps.forkAtMessage(row.id, target.clientId)).id;
+  } catch (e) {
+    const code = (e as { code?: string }).code;
+    const message = e instanceof Error ? e.message : String(e);
+    switch (code) {
+      case 'SOURCE_NOT_FOUND':
+      case 'MESSAGE_NOT_FOUND':
+        return err('NOT_FOUND', message);
+      case 'NOT_USER_MESSAGE':
+        return err('INVALID_ARGS', message);
+      case 'SOURCE_NEVER_RAN':
+      case 'NO_PRIOR_ASSISTANT':
+      case 'REMOTE_NOT_SUPPORTED':
+      case 'CODEX_FORK_STATE_UNAVAILABLE':
+        return err('PRECONDITION_FAILED', message);
+      case 'UNSUPPORTED_HISTORY':
+        return err('UNSUPPORTED_CAPABILITY', message);
+      default:
+        return err('INTERNAL', message);
+    }
+  }
+  // fork 已经建好并广播,是不可逆副作用。这次补充读取只为拿标题等展示字段,
+  // 失败(瞬时 DB 错误 / owner 切换)不能让整个调用变成 INTERNAL —— 调用方会据此重试,
+  // 再建一条重复任务。读不到就退回下面已有的兜底投影。
+  const [forked] = await deps.loadSessions([forkedId]).catch(() => []);
+  return {
+    ok: true,
+    session: forked
+      ? toItem(forked)
+      : {
+          sessionId: forkedId,
+          title: null,
+          workingDir: row.workingDir,
+          workspaceKind: row.workspaceKind,
+          status: 'active',
+        },
+    // 在 user 消息上分叉时 fork 只复制该消息之前的历史;GUI 会把这条消息放进新会话的作曲器,
+    // MCP 路径没有作曲器,把正文随结果返回,由调用方决定是否作为新会话的首条消息发送。
+    ...(target.role === 'user' && target.text ? { draftText: target.text } : {}),
+  };
 }

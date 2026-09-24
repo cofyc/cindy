@@ -8,12 +8,20 @@
 
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
+import { projectPersistedAgentFacingUserText } from '@cindy/maker-shared/agent-input-projection';
+import { joinChatQuoteTextSegments, parseChatQuoteSegments } from '@cindy/maker-shared/chat-quotes';
+import type { ForkSessionResult } from '@cindy/mcps';
+
 import { bindingStore } from '../im/binding.js';
 import { getDbClient, tryGetDbClient } from '../localDb/client/current.js';
 import { updateSessionInDb } from '../localDb/ipc/sessions.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
-import { orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
+import { withSessionRouteLock } from '../localDb/sessionRouteLock.js';
+import { emitSessionCreated } from '../localDb/ipc/sessionCreatedBroadcast.js';
+import { messages, orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
+import { forkSessionAtMessage } from '../maker-orchestration/fork.js';
 import {
+  forkSession,
   type SessionOperationsDeps,
   type SessionOpsRow,
 } from './sessionOperations.js';
@@ -54,6 +62,48 @@ function toRow(row: {
     orcaRole: row.orcaRole as SessionOpsRow['orcaRole'],
     messageCount: Number(row.messageCount ?? 0),
   };
+}
+
+/**
+ * 消息正文在 DB 里是 JSON 编码的(user 消息形如 `'"hello"'`,见 main/__tests__/fork.test.ts),
+ * 直接回传会把引号一并带给作曲器。先解码再按块取文本;解不出 JSON 的按纯文本原样返回。
+ */
+export function messageTextForDraft(content: unknown): string {
+  if (typeof content !== 'string') return '';
+  const trimmed = content.trim();
+  if (!trimmed) return '';
+  // envelope(带 quotesEncoded / agentReferences 等 composer 引用元数据)统一走仓内既有的
+  // agent-facing 投影:它会剥掉引用私有标记,并把消息/任务/项目/浏览器等引用还原成可读正文,
+  // 而不是留下不透明的 cindy:// 文本。非 envelope 形态再退回下面的按块取文本。
+  const projected = projectPersistedAgentFacingUserText(trimmed);
+  if (projected !== null) return projected;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return content;
+  }
+  return draftBlocksToText(parsed);
+}
+
+/**
+ * 取文本的口径与 maker-ipc/sessionReferenceResolver 的 contentToText 一致;
+ * 带 `quotesEncoded` 的 envelope 额外按 autoReviewUserIntent 的同款投影剥掉引用私有标记,
+ * 否则标记会原样进入 draft_text 被模型读到。
+ */
+function draftBlocksToText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(draftBlocksToText).filter(Boolean).join('\n');
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === 'string') {
+      return record.quotesEncoded === true
+        ? joinChatQuoteTextSegments(parseChatQuoteSegments(record.text))
+        : record.text;
+    }
+    if (typeof record.content === 'string') return record.content;
+  }
+  return '';
 }
 
 export function createSessionOperationsDeps(
@@ -111,6 +161,35 @@ export function createSessionOperationsDeps(
       const run = () => updateSessionInDb(sessionId, patch, undefined, guard);
       return guard ? bindingStore.runExclusive(run) : run();
     },
+    withSessionLock: (sessionId, task) => withSessionRouteLock(sessionId, task),
+    resolveMessageClientId: async (sessionId, messageId) => {
+      const [row] = await getDbClient()
+        .drizzle.select({
+          clientId: messages.clientId,
+          role: messages.role,
+          content: messages.content,
+          rewindAt: messages.rewindAt,
+        })
+        .from(messages)
+        .where(and(eq(messages.sessionId, sessionId), eq(messages.id, messageId)))
+        .limit(1);
+      if (!row) return null;
+      return {
+        clientId: row.clientId,
+        role: row.role,
+        text: messageTextForDraft(row.content),
+        // get_chat_history(include_rewound=true) 能取到已 Rewind 的消息 id,但
+        // forkSessionAtMessage 复制历史时会过滤 rewindAt 非空的行(fork.ts 的
+        // isNull(messages.rewindAt)),放行会分叉出不含该消息、锚点更早的新任务。
+        rewound: row.rewindAt != null,
+      };
+    },
+    forkAtMessage: async (sessionId, messageClientId) => {
+      const session = await forkSessionAtMessage(sessionId, messageClientId);
+      // 与 maker-ipc/fork.ts 的 IPC handler 同款广播,侧栏与 device-link 控制端即时看到新会话。
+      emitSessionCreated(session.id);
+      return { id: session.id };
+    },
   };
 }
 
@@ -136,4 +215,11 @@ export function createSessionOpsGuard(isTurnRunning: (sessionId: string) => bool
         )
       : Promise.resolve(notReady);
   return { deps, guarded };
+}
+
+/** cindy_helper fork_session 的 host 回调。 */
+export function createForkSession(isTurnRunning: (sessionId: string) => boolean) {
+  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  return (params: { sessionId: string; messageId: string }): Promise<ForkSessionResult> =>
+    guarded(() => forkSession(deps, params));
 }
