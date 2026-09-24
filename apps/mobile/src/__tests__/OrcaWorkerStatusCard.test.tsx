@@ -56,7 +56,7 @@ vi.mock('@/theme/tokens', () => ({
   iconSize: { sm: 8, md: 16 },
   iconStroke: { regular: 2 },
   lineHeight: { listBody: 20 },
-  radius: { container: 12, micro: 3 },
+  radius: { container: 12, micro: 3, pill: 9999 },
   typeScale: { body: 14, caption: 12 },
 }));
 
@@ -841,4 +841,19 @@ it('跨设备切走再切回:同一登录身份下已读的完成不得复活为
   // 切回设备 A,worker 仍是 done:同一轮 done,不得重新变未读。
   await mountOn('dev-A');
   expect(attentionDot()).toBeNull();
+});
+
+it('状态点与提示点都是圆形(pill 半径),与共享 StatusDot 几何一致', async () => {
+  vi.useFakeTimers();
+  await render([{ id: 'a', label: 'w-done', status: 'done', sessionId: 's-a' }], () => true);
+  const radiusOf = (el: Element | null | undefined) => {
+    const raw = el?.getAttribute('data-style');
+    return raw ? [JSON.parse(raw)].flat(Infinity).find((s: any) => s?.borderRadius !== undefined)?.borderRadius : undefined;
+  };
+  // 折叠态提示点。
+  expect(radiusOf(attentionDot())).toBe(9999);
+  // 展开后的行内状态点。
+  await act(async () => toggle().click());
+  const row = container.querySelector('[data-testid="session.orcaWorkers.worker.s-a"]');
+  expect(radiusOf(row?.querySelector('div[data-style]'))).toBe(9999);
 });
