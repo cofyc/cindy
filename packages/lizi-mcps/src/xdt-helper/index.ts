@@ -14,6 +14,7 @@ export type {
   SessionOpResult,
 } from './_session_ops.js';
 export { hostErrorPayload, sessionOpItemToPayload } from './_session_ops.js';
+export { registerDeleteSessionsTool, type DeleteSessionPreviewItem, type DeleteSessionsDeps, type DeleteSessionsResult } from './delete_sessions.js';
 export { registerGetCapabilitiesTool } from './get_capabilities.js';
 export { registerGrokLoginTools, type GrokLoginCallbacks, type GrokLoginState } from './grok_login.js';
 export { registerSkillhubTools, type SkillhubAgentCallback, type SkillhubAgentRequest } from './skillhub.js';
