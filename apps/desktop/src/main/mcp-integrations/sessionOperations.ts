@@ -12,7 +12,13 @@
  * (docs/dev-rules/engineering-conventions.md §3)。
  */
 
-import type { SessionOpErrorCode, SessionOpItem } from '@cindy/mcps';
+import type {
+  GetSessionBranchesResult,
+  OpenSessionInNewWindowResult,
+  SessionBranchItem,
+  SessionOpErrorCode,
+  SessionOpItem,
+} from '@cindy/mcps';
 import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 
 import { isIpcError } from '../../shared/ipc-errors.js';
@@ -53,6 +59,8 @@ export interface SessionOperationsDeps {
     patch: Record<string, unknown>,
     hooks?: { beforeWrite?: () => Promise<string | null> },
   ): Promise<unknown>;
+  /** secondary-windows.openSessionInNewWindow(本机桌面端窗口)。 */
+  openInNewWindow(sessionId: string): void;
 }
 
 type Err<E extends string> = { ok: false; errorCode: E; message: string };
@@ -138,4 +146,85 @@ export async function lateGuard(
   if (await isRunning(deps, fresh)) return '会话在写入前重新进入运行中';
   if (deps.isImAttached(fresh.id)) return '会话在写入前被 IM 接管';
   return null;
+}
+
+/** 在新的应用窗口里打开会话(GUI「在新窗口打开」同款);已删除拒绝。 */
+export async function openSessionInNewWindow(
+  deps: SessionOperationsDeps,
+  params: { sessionId: string },
+): Promise<OpenSessionInNewWindowResult> {
+  const loaded = await loadAll(deps, [params.sessionId]);
+  if (!Array.isArray(loaded)) return loaded;
+  const [row] = loaded;
+  if (row.status === 'deleted') return err('PRECONDITION_FAILED', `${row.id}: 会话已删除`);
+  // 伙伴(Bot)会话必须走 /bots/ 或伙伴历史路由(botRouteForOwnedSession);副窗的
+  // SecondaryWindowBootGate 只经 resolveSessionRoute 解析 Orca 身份,不认伙伴身份,
+  // 放行会把隐藏的伙伴任务开成缺少伙伴身份与门禁的普通任务界面。
+  if (row.source === 'bot') {
+    return err('PRECONDITION_FAILED', `${row.id}: 伙伴(Bot)会话要从伙伴页面打开,不能开成普通任务窗口`);
+  }
+  try {
+    deps.openInNewWindow(row.id);
+  } catch (e) {
+    return err('INTERNAL', e instanceof Error ? e.message : String(e));
+  }
+  return { ok: true, sessionId: row.id, title: row.title };
+}
+
+/** 会话分叉家族:沿 parentSessionId 向上找根(链断即根),再 BFS 收集全部未删除的派生会话。 */
+/**
+ * 分支家族只收侧栏可见的会话 —— GUI 的 SessionBranchTreeDialog 拿到的就是侧栏列表,
+ * 伙伴(Bot)会话与 Orca worker 不在其中,所以那里从来不会把它们画成分支。
+ *
+ * 判据**不能**用 `forkedAtMessageId != null`:`maker-orchestration/fork.ts` 的
+ * forkSessionStripEncrypted 会写 parentSessionId 但把 forkedAtMessageId 留空,
+ * 那是合法分支;而 botDelegationService 给委派子会话写的 parentSessionId
+ * (见 botDelegationService.ts:806)对应的会话 source 是 'bot'。
+ */
+function isBranchVisible(row: SessionOpsRow): boolean {
+  return row.source !== 'bot' && row.orcaRole !== 'worker';
+}
+
+export async function getSessionBranches(
+  deps: SessionOperationsDeps,
+  params: { sessionId: string },
+): Promise<GetSessionBranchesResult> {
+  const loaded = await loadAll(deps, [params.sessionId]);
+  if (!Array.isArray(loaded)) return loaded;
+  if (loaded[0].status === 'deleted') return err('PRECONDITION_FAILED', `${loaded[0].id}: 会话已删除`);
+  // 入口也要过同一把可见性判据:不然传入伙伴 / worker 会话时,有可见祖先的会被下面的 BFS
+  // 过滤掉(成功结果里反而没有请求的那个 id),没有可见父节点的又会自己当根混进家族。
+  if (!isBranchVisible(loaded[0])) {
+    return err('PRECONDITION_FAILED', `${loaded[0].id}: 伙伴(Bot)会话与协同 worker 不在分叉家族中`);
+  }
+  // 向上找根(源被删时 parentSessionId 已 SET NULL,链在此断开即视为根)。
+  let root = loaded[0];
+  const seen = new Set<string>([root.id]);
+  while (root.parentSessionId && !seen.has(root.parentSessionId)) {
+    const [parent] = await deps.loadSessions([root.parentSessionId]);
+    // 源会话已软删除、或父节点是侧栏不可见的会话时链在此断开:GUI 分支树同样不展示。
+    if (!parent || parent.status === 'deleted' || !isBranchVisible(parent)) break;
+    seen.add(parent.id);
+    root = parent;
+  }
+  // 向下 BFS 收集全部派生会话。
+  const family: SessionOpsRow[] = [root];
+  let frontier = [root.id];
+  const visited = new Set<string>([root.id]);
+  while (frontier.length > 0) {
+    // 软删除、以及侧栏不可见的会话(伙伴会话 / Orca worker)及其后代整体不进家族。
+    const children = (await deps.loadChildren(frontier)).filter(
+      (row) => !visited.has(row.id) && row.status !== 'deleted' && isBranchVisible(row),
+    );
+    for (const child of children) visited.add(child.id);
+    family.push(...children);
+    frontier = children.map((row) => row.id);
+  }
+  const items: SessionBranchItem[] = family.map((row) => ({
+    ...toItem(row),
+    parentSessionId: row.parentSessionId,
+    forkedAtMessageId: row.forkedAtMessageId,
+    createdAt: row.createdAt,
+  }));
+  return { ok: true, rootSessionId: root.id, family: items };
 }

@@ -14,6 +14,8 @@ export type {
   SessionOpResult,
 } from './_session_ops.js';
 export { hostErrorPayload, sessionOpItemToPayload } from './_session_ops.js';
+export { registerOpenSessionInNewWindowTool, type OpenSessionInNewWindowDeps, type OpenSessionInNewWindowResult } from './open_session_in_new_window.js';
+export { registerGetSessionBranchesTool, type GetSessionBranchesDeps, type GetSessionBranchesResult, type SessionBranchItem } from './get_session_branches.js';
 export { registerGetCapabilitiesTool } from './get_capabilities.js';
 export { registerGrokLoginTools, type GrokLoginCallbacks, type GrokLoginState } from './grok_login.js';
 export { registerSkillhubTools, type SkillhubAgentCallback, type SkillhubAgentRequest } from './skillhub.js';
