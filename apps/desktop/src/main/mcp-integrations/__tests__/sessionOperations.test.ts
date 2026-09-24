@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  forkSession,
   lateGuard,
   loadAll,
   mapIpcError,
@@ -54,6 +55,9 @@ function makeDeps(rows: SessionOpsRow[], overrides: Partial<SessionOperationsDep
     isTurnRunning: () => false,
     isImAttached: () => false,
     updateSession,
+    withSessionLock: async <T,>(_sessionId: string, task: () => Promise<T>) => task(),
+    resolveMessageClientId: async () => ({ clientId: 'client-1', role: 'assistant', text: '' }),
+    forkAtMessage: async () => ({ id: 'forked' }),
     ...overrides,
   };
   return { deps, updateSession };
@@ -151,5 +155,98 @@ describe('mapIpcError', () => {
 
   it('falls back to INTERNAL for an unknown throw', () => {
     expect(mapIpcError(new Error('boom'))).toMatchObject({ ok: false, errorCode: 'INTERNAL' });
+  });
+});
+
+describe('forkSession', () => {
+  it('resolves the message client id and returns the forked session', async () => {
+    const forkAtMessage = vi.fn(async () => ({ id: 'forked' }));
+    const { deps } = makeDeps([row('a'), row('forked', { parentSessionId: 'a' })], { forkAtMessage });
+    const res = await forkSession(deps, { sessionId: 'a', messageId: 'm1' });
+    expect(forkAtMessage).toHaveBeenCalledWith('a', 'client-1');
+    expect(res).toMatchObject({ ok: true, session: { sessionId: 'forked' } });
+  });
+
+  it('refuses deleted, remote and unknown sessions', async () => {
+    const { deps } = makeDeps([row('d', { status: 'deleted' }), row('r', { remoteHostId: 'host' })]);
+    expect(await forkSession(deps, { sessionId: 'd', messageId: 'm' })).toMatchObject({ errorCode: 'PRECONDITION_FAILED' });
+    expect(await forkSession(deps, { sessionId: 'r', messageId: 'm' })).toMatchObject({ errorCode: 'PRECONDITION_FAILED' });
+    expect(await forkSession(deps, { sessionId: 'x', messageId: 'm' })).toMatchObject({ errorCode: 'NOT_FOUND' });
+  });
+
+  it('maps fork error codes', async () => {
+    const withCode = (code: string) =>
+      makeDeps([row('a')], {
+        forkAtMessage: async () => {
+          throw Object.assign(new Error(code), { code });
+        },
+      }).deps;
+    expect(await forkSession(withCode('NOT_USER_MESSAGE'), { sessionId: 'a', messageId: 'm' })).toMatchObject({ errorCode: 'INVALID_ARGS' });
+    expect(await forkSession(withCode('NO_PRIOR_ASSISTANT'), { sessionId: 'a', messageId: 'm' })).toMatchObject({ errorCode: 'PRECONDITION_FAILED' });
+    expect(await forkSession(withCode('UNSUPPORTED_HISTORY'), { sessionId: 'a', messageId: 'm' })).toMatchObject({ errorCode: 'UNSUPPORTED_CAPABILITY' });
+    expect(await forkSession(withCode('SOMETHING_ELSE'), { sessionId: 'a', messageId: 'm' })).toMatchObject({ errorCode: 'INTERNAL' });
+    const { deps: noMsg } = makeDeps([row('a')], { resolveMessageClientId: async () => null });
+    expect(await forkSession(noMsg, { sessionId: 'a', messageId: 'm' })).toMatchObject({ errorCode: 'NOT_FOUND' });
+  });
+
+  it('refuses to fork at a rewound message instead of silently anchoring earlier', async () => {
+    // fork.ts 复制历史时过滤 rewindAt 非空的行,放行会建出不含该消息的新任务。
+    const { deps } = makeDeps([row('a')], {
+      resolveMessageClientId: async () => ({ clientId: 'c1', role: 'user', text: 'x', rewound: true }),
+      forkAtMessage: async () => {
+        throw new Error('forkAtMessage must not run for a rewound anchor');
+      },
+    });
+    expect(await forkSession(deps, { sessionId: 'a', messageId: 'm' })).toMatchObject({
+      ok: false,
+      errorCode: 'PRECONDITION_FAILED',
+    });
+  });
+
+  it('still reports success when the post-fork read fails', async () => {
+    // fork 已建好并广播;补充读取失败若冒泡成 INTERNAL,调用方重试会再建一条重复任务。
+    let loads = 0;
+    const base = row('a');
+    const { deps } = makeDeps([base], {
+      loadSessions: async (ids) => {
+        loads += 1;
+        if (loads > 2) throw new Error('transient db error');
+        return ids.flatMap((id) => (id === 'a' ? [base] : []));
+      },
+    });
+    const res = await forkSession(deps, { sessionId: 'a', messageId: 'm' });
+    expect(res).toMatchObject({ ok: true, session: { sessionId: 'forked' } });
+  });
+
+  it('refuses to fork a source deleted inside the session lock', async () => {
+    // forkSessionAtMessage 只校验源行存在,软删除会保留行 —— 预检通过后被并发删除时
+    // 必须在锁内复核拦下,否则会从已删除任务派生出 active 子任务。
+    const base = row('a');
+    let loads = 0;
+    const { deps } = makeDeps([base], {
+      loadSessions: async (ids) => {
+        loads += 1;
+        const status = loads === 1 ? ('active' as const) : ('deleted' as const);
+        return ids.flatMap((id) => (id === 'a' ? [{ ...base, status }] : []));
+      },
+      forkAtMessage: async () => {
+        throw new Error('forkAtMessage must not run for a deleted source');
+      },
+    });
+    const res = await forkSession(deps, { sessionId: 'a', messageId: 'm' });
+    expect(loads).toBeGreaterThan(1);
+    expect(res).toMatchObject({ ok: false, errorCode: 'PRECONDITION_FAILED' });
+  });
+
+  it('returns the selected user message as draftText so the caller can seed the new session', async () => {
+    const { deps } = makeDeps([row('a')], {
+      resolveMessageClientId: async () => ({ clientId: 'c', role: 'user', text: '继续做第二步' }),
+    });
+    expect(await forkSession(deps, { sessionId: 'a', messageId: 'm' })).toMatchObject({ ok: true, draftText: '继续做第二步' });
+    const { deps: assistant } = makeDeps([row('a')], {
+      resolveMessageClientId: async () => ({ clientId: 'c', role: 'assistant', text: 'reply' }),
+    });
+    const res = await forkSession(assistant, { sessionId: 'a', messageId: 'm' });
+    expect(res.ok && 'draftText' in res).toBe(false);
   });
 });
