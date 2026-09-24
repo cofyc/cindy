@@ -3,6 +3,7 @@ import { getPluginMarketService } from '../plugin-market/service.js';
 import { classifyHelperSurface } from './helperSurface.js';
 import { createProject } from './createProject.js';
 import { createMoveSession } from './moveSession.js';
+import { createDeleteSessions } from './sessionOperationsHost.js';
 import { listProjects, renameProject, removeProject } from './projectManagement.js';
 import { activeOwnerScopeKey, getActiveAppSession, isAppSessionBoundaryPending } from '../appSessionState.js';
 import type { createBotCapabilityService } from '../maker-ipc/botCapabilityService.js';
@@ -420,6 +421,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
       },
       createProject,
       moveSession: createMoveSession(isSessionInTurn),
+      deleteSessions: createDeleteSessions(isSessionInTurn),
       projectManagement: { list: listProjects, rename: renameProject, remove: removeProject },
       authorizeSkillLearning: async (request, context) => {
         if (!isCindyLearnSkillEnabled()) {

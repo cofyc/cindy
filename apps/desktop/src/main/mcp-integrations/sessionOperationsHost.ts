@@ -8,12 +8,16 @@
 
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
+import type { DeleteSessionsResult } from '@cindy/mcps';
+
 import { bindingStore } from '../im/binding.js';
 import { getDbClient, tryGetDbClient } from '../localDb/client/current.js';
 import { updateSessionInDb } from '../localDb/ipc/sessions.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
+import { getRemovalPreview } from '../worktree/WorktreeManager.js';
 import {
+  deleteSessions,
   type SessionOperationsDeps,
   type SessionOpsRow,
 } from './sessionOperations.js';
@@ -111,6 +115,7 @@ export function createSessionOperationsDeps(
       const run = () => updateSessionInDb(sessionId, patch, undefined, guard);
       return guard ? bindingStore.runExclusive(run) : run();
     },
+    worktreeRemovalPreview: (sessionId) => getRemovalPreview(sessionId),
   };
 }
 
@@ -136,4 +141,14 @@ export function createSessionOpsGuard(isTurnRunning: (sessionId: string) => bool
         )
       : Promise.resolve(notReady);
   return { deps, guarded };
+}
+
+/** cindy_helper delete_sessions 的 host 回调。 */
+export function createDeleteSessions(isTurnRunning: (sessionId: string) => boolean) {
+  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  return (params: {
+    sessionIds: string[];
+    dryRun: boolean;
+    expectedDirty?: Record<string, boolean>;
+  }): Promise<DeleteSessionsResult> => guarded(() => deleteSessions(deps, params));
 }
