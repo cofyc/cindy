@@ -53,15 +53,22 @@ function workerKey(worker: Worker, index: number): string {
 // 显示成绿色 Done。记下产生未读的状态,提示语义才跟着来源走。
 const unreadWorkers = new Map<string, string>();
 const lastWorkerStatus = new Map<string, string>();
-/** 当前 store 归属的账号。换账号 / 登出即整体作废,见 resetWorkerAttentionScope。 */
+/** 当前 store 归属的「账号 + 设备」。任一变化即整体作废,见 resetWorkerAttentionScope。 */
 let attentionScope: string | null = null;
 
 /**
- * 未读与已读状态属于**当前登录账号**。module 级 store 会跨登出与进程内换号存活,
- * 而 key 只含 Lead / Worker id —— 同一台被控 Desktop 的另一账号可能出现相同 id,
- * 从而继承上一个账号的未读/已读。切换作用域时整体清空,不做跨账号保留。
+ * 未读与已读状态属于**当前登录账号在当前被控设备上**的视角。module 级 store 会跨
+ * 登出与进程内换号存活,而 key 只含 Lead / Worker id —— 同一台 Desktop 的另一账号、
+ * 或另一台 Desktop 上的同名 id,都可能继承上一份未读/已读。切换作用域时整体清空。
  */
-function resetWorkerAttentionScope(scope: string): boolean {
+/** @internal 导出仅供单测:围栏守的是「渲染期 reset 已执行、passive cleanup 未执行」那个
+ * 窗口,act() 会把两者压在一起,无法经组件复现,只能直测。 */
+export function workerAttentionScope(accountScope: string, deviceId: string): string {
+  return `${accountScope}::${deviceId}`;
+}
+
+/** @internal 导出仅供单测,理由同上。 */
+export function resetWorkerAttentionScope(scope: string): boolean {
   if (attentionScope === scope) return false;
   attentionScope = scope;
   unreadWorkers.clear();
@@ -74,7 +81,13 @@ function attentionKey(leadSessionId: string, key: string): string {
 }
 
 /** 按新快照推进边沿判定。返回未读集合是否变化,供调用方决定是否重渲染。 */
-function applyWorkerAttentionEdges(leadSessionId: string, workers: Worker[]): boolean {
+/** @internal 导出仅供单测,理由同上。 */
+export function applyWorkerAttentionEdges(scope: string, leadSessionId: string, workers: Worker[]): boolean {
+  // 在飞响应的围栏:发起这轮请求时的作用域若已不是当前作用域,说明换号/换设备已经
+  // 发生且 store 已被重置 —— 这份数据属于上一个视角,必须整体丢弃,不能写进新 store。
+  // effect 依赖已含 accountScope / deviceId,正常路径下 cleanup 会先把 active 置否;
+  // 这道围栏挡的是「reset 已执行、cleanup 尚未执行」那一窗口里落地的响应。
+  if (scope !== attentionScope) return false;
   let changed = false;
   workers.forEach((worker, index) => {
     const key = attentionKey(leadSessionId, workerKey(worker, index));
@@ -161,8 +174,9 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
   }, []);
   // 未读只存在于 module 级 store(见上),这里只用一个计数器触发重渲染。
   const [, bumpAttention] = useReducer((value: number) => value + 1, 0);
-  // 渲染期同步作废:换账号后首帧就不能沿用上一个账号的未读,靠 effect 事后清会闪一帧。
-  resetWorkerAttentionScope(accountScope);
+  // 渲染期同步作废:换账号/换设备后首帧就不能沿用上一份未读,靠 effect 事后清会闪一帧。
+  const attentionScopeKey = workerAttentionScope(accountScope, deviceId);
+  resetWorkerAttentionScope(attentionScopeKey);
   // 换 Lead 时收起列表。快照不在此处清 —— 它由上面的 lead 比对同步失效,不依赖
   // effect 事后补刀。未读同样**不**重置:契约要求切走 / 切回不得让同一轮 done
   // 重新变未读。
@@ -200,13 +214,17 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
     if (!polling) return;
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // 捕获本轮 effect 的作用域。换号/换设备会让依赖变化 → 本 effect cleanup 置 active=false
+    // 并重启;但 reset 发生在渲染期、早于 passive cleanup,那一窗口里落地的旧响应仍会走到
+    // 下面,故把它传给 applyWorkerAttentionEdges 做围栏。
+    const scope = attentionScopeKey;
     const load = async () => {
       // stop 不能用 return 代替:finally 照样会执行,只有标志能拦住下一轮排程。
       let stop = false;
       try {
         const next = workersFrom(await maker.listOrcaWorkersByLead(leadSessionId));
         if (active) {
-          applyWorkerAttentionEdges(leadSessionId, next);
+          applyWorkerAttentionEdges(scope, leadSessionId, next);
           setSnapshot({ account: accountScope, device: deviceId, lead: leadSessionId, workers: next });
         }
       } catch (error) {
@@ -230,7 +248,7 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
       active = false;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [leadSessionId, maker, polling]);
+  }, [leadSessionId, maker, polling, attentionScopeKey]);
   // 拿到非空快照前不占位:本卡在 sessionChrome 里,其 onLayout 高度是消息列表的
   // 顶部内距,先撑开再收起会让会话内容跳动。
   if (!workers?.length) return null;

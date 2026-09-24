@@ -105,6 +105,9 @@ async function render(workers: unknown[], onOpenWorker?: (id: string) => boolean
   });
 }
 
+/** 现实中 useMobileMakerTransport 在换号/重连时保持同一身份,测试必须复用同一对象。 */
+const stableMaker = { listOrcaWorkersByLead: (...a: unknown[]) => h.listOrcaWorkersByLead(...a) } as any;
+
 const attentionDot = () => container.querySelector('[data-testid="session.orcaWorkers.attention"]');
 const toggle = () =>
   container.querySelector('[data-testid="session.orcaWorkers.toggle"]') as HTMLButtonElement;
@@ -657,4 +660,101 @@ it('快照绑定账号与设备:换号或换设备后旧列表立刻失效,不�
   h.listOrcaWorkersByLead.mockReturnValue(new Promise(() => {}));
   await render1('acct-B', 'dev-2');
   expect(container.innerHTML).toBe('');
+});
+
+it('换号时在飞的旧响应不得污染新账号的未读', async () => {
+  vi.useFakeTimers();
+  const mount = async (accountScope: string) => {
+    await act(async () => {
+      root.render(
+        createElement(OrcaWorkerStatusCard as any, {
+          leadSessionId: lead,
+          accountScope,
+          deviceId: 'dev-1',
+          maker: stableMaker,
+          onOpenWorker: () => true,
+        }),
+      );
+    });
+  };
+
+  // 账号 A 的第一轮请求悬停,让它在换号之后才落地。
+  let settleOld: ((v: unknown) => void) | undefined;
+  h.listOrcaWorkersByLead.mockReturnValue(new Promise((r) => { settleOld = r; }));
+  await mount('acct-A');
+
+  // 换到账号 B:store 在渲染期被重置,B 自己先看到 running。
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w', status: 'running', sessionId: 's-a' },
+  ]);
+  await mount('acct-B');
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+  // 账号 A 的响应此刻才落地,带着一个 done —— 不得给账号 B 造出未读,
+  // 也不得把 lastStatus 写成 done(那会吞掉 B 后续 running → done 的边沿)。
+  await act(async () => {
+    settleOld?.([{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }]);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  expect(attentionDot()).toBeNull();
+
+  // B 自己的 running → done 必须照常产生未读。
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w', status: 'done', sessionId: 's-a' },
+  ]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(attentionDot()).not.toBeNull();
+});
+
+it('换号后轮询重启,卡片能显示新账号的数据', async () => {
+  vi.useFakeTimers();
+  const mount = async (accountScope: string) => {
+    await act(async () => {
+      root.render(
+        createElement(OrcaWorkerStatusCard as any, {
+          leadSessionId: lead,
+          accountScope,
+          deviceId: 'dev-1',
+          maker: stableMaker,
+          onOpenWorker: () => true,
+        }),
+      );
+    });
+  };
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w-A', status: 'running', sessionId: 's-a' },
+  ]);
+  await mount('acct-A');
+  await act(async () => toggle().click());
+  expect(container.textContent).toContain('w-A');
+
+  // 换号:effect 依赖含作用域,必须重启并用新账号身份写快照,否则卡片永远空白。
+  // expanded 不随换号重置,这里不再 toggle。
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'b', label: 'w-B', status: 'running', sessionId: 's-b' },
+  ]);
+  await mount('acct-B');
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(container.textContent).toContain('w-B');
+  expect(container.textContent).not.toContain('w-A');
+});
+
+// 围栏直测:组件路径下 act() 会把渲染与 passive cleanup 压在一起,复现不出
+// 「reset 已执行、cleanup 未执行」的窗口,故直接驱动 store 函数。
+it('在飞响应的作用域围栏:reset 之后落地的旧响应被整体丢弃', async () => {
+  const { workerAttentionScope, resetWorkerAttentionScope, applyWorkerAttentionEdges } =
+    await import('@/session/OrcaWorkerStatusCard');
+  const scopeA = workerAttentionScope('acct-A', 'dev-1');
+  const scopeB = workerAttentionScope('acct-B', 'dev-1');
+  const done = [{ id: 'a', status: 'done', sessionId: 's-a' }];
+
+  resetWorkerAttentionScope(scopeA);
+  expect(applyWorkerAttentionEdges(scopeA, 'lead-x', done)).toBe(true);
+
+  // 换号:store 被重置为 B。此刻账号 A 的在飞响应才落地。
+  resetWorkerAttentionScope(scopeB);
+  expect(applyWorkerAttentionEdges(scopeA, 'lead-x', done)).toBe(false);
+
+  // B 自己观测到同一个 worker 的 done,仍应是一次全新的边沿(未被 A 的数据污染)。
+  expect(applyWorkerAttentionEdges(scopeB, 'lead-x', done)).toBe(true);
 });
