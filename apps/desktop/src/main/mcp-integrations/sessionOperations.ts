@@ -12,8 +12,9 @@
  * (docs/dev-rules/engineering-conventions.md §3)。
  */
 
-import type { SessionOpErrorCode, SessionOpItem } from '@cindy/mcps';
+import type { ExportSessionResult, SessionOpErrorCode, SessionOpItem } from '@cindy/mcps';
 import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
+import { dirname, isAbsolute } from 'node:path';
 
 import { isIpcError } from '../../shared/ipc-errors.js';
 
@@ -53,6 +54,27 @@ export interface SessionOperationsDeps {
     patch: Record<string, unknown>,
     hooks?: { beforeWrite?: () => Promise<string | null> },
   ): Promise<unknown>;
+  /** 已存在的目录返回其真实路径(解 symlink),否则 null。 */
+  resolveDirectory(path: string): Promise<string | null>;
+  fileExists(path: string): Promise<boolean>;
+  /** session-share 导出编排(exportSessionShare);remote / worker / deleted 由其内部抛带 code 的错误。 */
+  exportShare(opts: {
+    sessionId: string;
+    targetPath: string;
+    excludeMedia: boolean;
+  }): Promise<SessionShareExportOutcomeLike>;
+}
+
+export interface SessionShareExportOutcomeLike {
+  status: 'ok' | 'oversize';
+  filePath?: string;
+  fidelity?: string;
+  missingTranscripts?: string[];
+  mediaMissing?: number;
+  orcaWorkers?: number;
+  totalBytes?: number;
+  mediaBytes?: number;
+  limitBytes?: number;
 }
 
 type Err<E extends string> = { ok: false; errorCode: E; message: string };
@@ -138,4 +160,58 @@ export async function lateGuard(
   if (await isRunning(deps, fresh)) return '会话在写入前重新进入运行中';
   if (deps.isImAttached(fresh.id)) return '会话在写入前被 IM 接管';
   return null;
+}
+
+/**
+ * 导出 .cshare 分享包(GUI「导出分享包」同款,但目标路径由调用方给出):必须是绝对路径,
+ * 扩展名不符自动补全,父目录须存在,目标文件已存在时拒绝(不覆盖);不加密(密码只经
+ * GUI 收集,不进 agent 工具入参)。超限映射为 OVERSIZE 并附体积数据,编排层的 coded error 原样映射。
+ */
+export async function exportSession(
+  deps: SessionOperationsDeps,
+  params: { sessionId: string; targetPath: string; excludeMedia: boolean },
+  shareFileExt: string,
+): Promise<ExportSessionResult> {
+  if (!isAbsolute(params.targetPath)) {
+    return err('INVALID_ARGS', `target_path 必须是绝对路径: ${params.targetPath}`);
+  }
+  const targetPath = params.targetPath.endsWith(shareFileExt)
+    ? params.targetPath
+    : `${params.targetPath}${shareFileExt}`;
+  const parent = dirname(targetPath);
+  // 导出只要求父目录存在;这里不像 move 那样校验软链身份 —— 写出的是一个新文件,
+  // 不会成为日后会话的受信工作区。
+  if (!(await deps.resolveDirectory(parent))) {
+    return err('INVALID_ARGS', `target_path 所在目录不存在: ${parent}`);
+  }
+  if (await deps.fileExists(targetPath)) {
+    return err('PRECONDITION_FAILED', `目标文件已存在,不覆盖: ${targetPath}`);
+  }
+  let outcome: SessionShareExportOutcomeLike;
+  try {
+    outcome = await deps.exportShare({ sessionId: params.sessionId, targetPath, excludeMedia: params.excludeMedia });
+  } catch (e) {
+    const code = (e as { code?: string }).code;
+    const message = e instanceof Error ? e.message : String(e);
+    if (code === 'NOT_FOUND' || code === 'PRECONDITION_FAILED') return err(code, message);
+    return err('INTERNAL', message);
+  }
+  if (outcome.status === 'oversize') {
+    return {
+      ...err('OVERSIZE', '分享包体积超过上限,可用 exclude_media=true 只导出文本与转录重试'),
+      data: {
+        total_bytes: outcome.totalBytes,
+        media_bytes: outcome.mediaBytes,
+        limit_bytes: outcome.limitBytes,
+      },
+    };
+  }
+  return {
+    ok: true,
+    filePath: outcome.filePath ?? targetPath,
+    fidelity: outcome.fidelity ?? 'unknown',
+    missingTranscripts: outcome.missingTranscripts ?? [],
+    mediaMissing: outcome.mediaMissing ?? 0,
+    orcaWorkers: outcome.orcaWorkers ?? 0,
+  };
 }
