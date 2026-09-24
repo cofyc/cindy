@@ -6,14 +6,21 @@
  * (mcp-providers 不能反向 import maker-host/index,会成环)。
  */
 
+import { realpath, stat } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
 import { and, eq, inArray, sql } from 'drizzle-orm';
+
+import type { ExportSessionResult } from '@cindy/mcps';
 
 import { bindingStore } from '../im/binding.js';
 import { getDbClient, tryGetDbClient } from '../localDb/client/current.js';
 import { updateSessionInDb } from '../localDb/ipc/sessions.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
+import { exportSessionShare } from '../session-share/sessionShareExport.js';
+import { SHARE_FILE_EXT } from '../session-share/xdtshareFormat.pure.js';
 import {
+  exportSession,
   type SessionOperationsDeps,
   type SessionOpsRow,
 } from './sessionOperations.js';
@@ -111,6 +118,24 @@ export function createSessionOperationsDeps(
       const run = () => updateSessionInDb(sessionId, patch, undefined, guard);
       return guard ? bindingStore.runExclusive(run) : run();
     },
+    resolveDirectory: async (path) => {
+      if (!isAbsolute(path)) return null;
+      try {
+        const canonical = await realpath(path);
+        return (await stat(canonical)).isDirectory() ? canonical : null;
+      } catch {
+        return null;
+      }
+    },
+    fileExists: async (path) => {
+      try {
+        await stat(path);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    exportShare: (opts) => exportSessionShare({ ...opts, password: null }),
   };
 }
 
@@ -136,4 +161,11 @@ export function createSessionOpsGuard(isTurnRunning: (sessionId: string) => bool
         )
       : Promise.resolve(notReady);
   return { deps, guarded };
+}
+
+/** cindy_helper export_session 的 host 回调。 */
+export function createExportSession(isTurnRunning: (sessionId: string) => boolean) {
+  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  return (params: { sessionId: string; targetPath: string; excludeMedia: boolean }): Promise<ExportSessionResult> =>
+    guarded(() => exportSession(deps, params, SHARE_FILE_EXT));
 }

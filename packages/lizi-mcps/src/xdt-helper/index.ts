@@ -14,6 +14,7 @@ export type {
   SessionOpResult,
 } from './_session_ops.js';
 export { hostErrorPayload, sessionOpItemToPayload } from './_session_ops.js';
+export { registerExportSessionTool, type ExportSessionDeps, type ExportSessionOk, type ExportSessionResult } from './export_session.js';
 export { registerGetCapabilitiesTool } from './get_capabilities.js';
 export { registerAppUpdateTools, type AppUpdateCallbacks } from './app_update.js';
 export { registerGrokLoginTools, type GrokLoginCallbacks, type GrokLoginState } from './grok_login.js';
