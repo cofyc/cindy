@@ -63,12 +63,22 @@ vi.mock('@/theme/tokens', () => ({
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const { OrcaWorkerStatusCard } = await import('@/session/OrcaWorkerStatusCard');
+// 登录身份走真实的 authOwnerGeneration(卡片通过 useSyncExternalStore 订阅它),
+// 测到的就是生产中的身份发布路径,而不是一个自造的 prop。
+const authOwner = await import('@/auth/authOwnerGeneration');
+
+/** 切换登录身份。setMobileAuthOwner 会同步通知订阅者,必须包在 act 里。 */
+async function signIn(accountId: string | null, realm: 'global' | 'cn' = 'global') {
+  await act(async () => { authOwner.setMobileAuthOwner(accountId, realm); });
+}
 
 let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
   h.listOrcaWorkersByLead.mockReset();
+  authOwner.__testing.reset();
+  authOwner.setMobileAuthOwner('acct-1');
   h.connectionEpoch = 0;
   h.peerAvailable = true;
   h.linkStatus = 'online';
@@ -96,7 +106,6 @@ async function render(workers: unknown[], onOpenWorker?: (id: string) => boolean
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
-        accountScope: 'acct-1',
         deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
         onOpenWorker,
@@ -289,7 +298,6 @@ it('CHANNEL_NOT_ALLOWED 是永久兼容结果:只探一次即停轮询', async (
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
-        accountScope: 'acct-1',
         deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
@@ -312,7 +320,6 @@ it('瞬时失败仍继续轮询,并在恢复后显示', async () => {
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
-        accountScope: 'acct-1',
         deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
@@ -356,7 +363,6 @@ it('device-link 重连(connectionEpoch 变化)后重新探测通道', async () =
   const render1 = () => root.render(
     createElement(OrcaWorkerStatusCard as any, {
       leadSessionId: lead,
-        accountScope: 'acct-1',
       deviceId: 'dev-1',
       maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
     }),
@@ -385,7 +391,6 @@ it('仅被控端重启(connectionEpoch 不变)也必须重探通道', async () =
   const draw = () => root.render(
     createElement(OrcaWorkerStatusCard as any, {
       leadSessionId: lead,
-        accountScope: 'acct-1',
       deviceId: 'dev-1',
       maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
     }),
@@ -420,7 +425,6 @@ it('peer 确定离线时暂停轮询,不再每 5 秒撞 DEVICE_OFFLINE', async (
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
-        accountScope: 'acct-1',
         deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
@@ -436,7 +440,6 @@ it('peer 回到在线后恢复轮询', async () => {
   const draw = () => root.render(
     createElement(OrcaWorkerStatusCard as any, {
       leadSessionId: lead,
-        accountScope: 'acct-1',
       deviceId: 'dev-1',
       maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
     }),
@@ -482,7 +485,6 @@ it('relay 掉线时暂停轮询,即便逐设备 availability 仍停在 true', as
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
-        accountScope: 'acct-1',
         deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
@@ -498,7 +500,6 @@ it('relay 恢复在线后继续轮询', async () => {
   const draw = () => root.render(
     createElement(OrcaWorkerStatusCard as any, {
       leadSessionId: lead,
-        accountScope: 'acct-1',
       deviceId: 'dev-1',
       maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
     }),
@@ -525,7 +526,6 @@ it('error 未读在 worker 转回 running 后仍显示错误色,不退化成绿�
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
-        accountScope: 'acct-1',
         deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
@@ -557,7 +557,6 @@ async function mountAndAdvance(statuses: string[]) {
     root.render(
       createElement(OrcaWorkerStatusCard as any, {
         leadSessionId: lead,
-        accountScope: 'acct-1',
         deviceId: 'dev-1',
         maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
       }),
@@ -589,11 +588,11 @@ it('未读与已读按账号隔离:换账号不得继承上一个账号的状态
   const workers = [{ id: 'a', label: 'w', status: 'done', sessionId: 's-a' }];
   h.listOrcaWorkersByLead.mockResolvedValue(workers);
   const mount = async (accountScope: string) => {
+    await signIn(accountScope);
     await act(async () => {
       root.render(
         createElement(OrcaWorkerStatusCard as any, {
           leadSessionId: lead,
-          accountScope,
           deviceId: 'dev-1',
           maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
           onOpenWorker: () => true,
@@ -627,11 +626,11 @@ it('未读与已读按账号隔离:换账号不得继承上一个账号的状态
 it('快照绑定账号与设备:换号或换设备后旧列表立刻失效,不渲染', async () => {
   vi.useFakeTimers();
   const render1 = async (accountScope: string, deviceId: string) => {
+    await signIn(accountScope);
     await act(async () => {
       root.render(
         createElement(OrcaWorkerStatusCard as any, {
           leadSessionId: lead,
-          accountScope,
           deviceId,
           maker: { listOrcaWorkersByLead: h.listOrcaWorkersByLead } as any,
           onOpenWorker: () => true,
@@ -665,11 +664,11 @@ it('快照绑定账号与设备:换号或换设备后旧列表立刻失效,不�
 it('换号时在飞的旧响应不得污染新账号的未读', async () => {
   vi.useFakeTimers();
   const mount = async (accountScope: string) => {
+    await signIn(accountScope);
     await act(async () => {
       root.render(
         createElement(OrcaWorkerStatusCard as any, {
           leadSessionId: lead,
-          accountScope,
           deviceId: 'dev-1',
           maker: stableMaker,
           onOpenWorker: () => true,
@@ -709,11 +708,11 @@ it('换号时在飞的旧响应不得污染新账号的未读', async () => {
 it('换号后轮询重启,卡片能显示新账号的数据', async () => {
   vi.useFakeTimers();
   const mount = async (accountScope: string) => {
+    await signIn(accountScope);
     await act(async () => {
       root.render(
         createElement(OrcaWorkerStatusCard as any, {
           leadSessionId: lead,
-          accountScope,
           deviceId: 'dev-1',
           maker: stableMaker,
           onOpenWorker: () => true,
@@ -741,20 +740,105 @@ it('换号后轮询重启,卡片能显示新账号的数据', async () => {
 
 // 围栏直测:组件路径下 act() 会把渲染与 passive cleanup 压在一起,复现不出
 // 「reset 已执行、cleanup 未执行」的窗口,故直接驱动 store 函数。
-it('在飞响应的作用域围栏:reset 之后落地的旧响应被整体丢弃', async () => {
-  const { workerAttentionScope, resetWorkerAttentionScope, applyWorkerAttentionEdges } =
+it('在飞响应的身份围栏:reset 之后落地的旧身份响应被整体丢弃', async () => {
+  const { workerAttentionOwnerScope, resetWorkerAttentionScope, applyWorkerAttentionEdges } =
     await import('@/session/OrcaWorkerStatusCard');
-  const scopeA = workerAttentionScope('acct-A', 'dev-1');
-  const scopeB = workerAttentionScope('acct-B', 'dev-1');
+  const ownerA = workerAttentionOwnerScope({ accountId: 'a', accountKey: 'ka', generation: 1 });
+  const ownerB = workerAttentionOwnerScope({ accountId: 'b', accountKey: 'kb', generation: 2 });
   const done = [{ id: 'a', status: 'done', sessionId: 's-a' }];
 
-  resetWorkerAttentionScope(scopeA);
-  expect(applyWorkerAttentionEdges(scopeA, 'lead-x', done)).toBe(true);
+  resetWorkerAttentionScope(ownerA);
+  expect(applyWorkerAttentionEdges(ownerA, 'dev-1', 'lead-x', done)).toBe(true);
 
   // 换号:store 被重置为 B。此刻账号 A 的在飞响应才落地。
-  resetWorkerAttentionScope(scopeB);
-  expect(applyWorkerAttentionEdges(scopeA, 'lead-x', done)).toBe(false);
+  resetWorkerAttentionScope(ownerB);
+  expect(applyWorkerAttentionEdges(ownerA, 'dev-1', 'lead-x', done)).toBe(false);
 
   // B 自己观测到同一个 worker 的 done,仍应是一次全新的边沿(未被 A 的数据污染)。
-  expect(applyWorkerAttentionEdges(scopeB, 'lead-x', done)).toBe(true);
+  expect(applyWorkerAttentionEdges(ownerB, 'dev-1', 'lead-x', done)).toBe(true);
+});
+
+it('登录身份按 realm 限定 key + generation 区分:同 membership id 不得视为同一身份', () => {
+  const g = (accountId: string, realm: 'global' | 'cn') => {
+    authOwner.setMobileAuthOwner(accountId, realm);
+    return authOwner.getMobileAuthOwner();
+  };
+  return import('@/session/OrcaWorkerStatusCard').then(({ workerAttentionOwnerScope }) => {
+    authOwner.__testing.reset();
+    const first = workerAttentionOwnerScope(g('u1', 'global'));
+    // 跨 realm 同 id:realm 限定的 accountKey 不同。
+    const otherRealm = workerAttentionOwnerScope(g('u1', 'cn'));
+    expect(otherRealm).not.toBe(first);
+    // 同 realm 同 id 重新登录(中间经过登出):generation 前进,仍是新身份。
+    authOwner.setMobileAuthOwner(null);
+    const relogin = workerAttentionOwnerScope(g('u1', 'global'));
+    expect(relogin).not.toBe(first);
+  });
+});
+
+// 组件级只能覆盖「跨 realm 同 id 直接切换」:登出→登入会经过一次空身份,裸 id 作用域
+// 也会变化,effect 随之重启,测不出差异;而「旧代次在飞响应被接受」只发生在 passive
+// cleanup 窗口,由上面的身份围栏直测覆盖。
+it('跨 realm 同 membership id 切换:上一 realm 的已读不得被新身份接受', async () => {
+  vi.useFakeTimers();
+  const mount = async () => {
+    await act(async () => {
+      root.render(
+        createElement(OrcaWorkerStatusCard as any, {
+          leadSessionId: lead,
+          deviceId: 'dev-1',
+          maker: stableMaker,
+          onOpenWorker: () => true,
+        }),
+      );
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  };
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w', status: 'done', sessionId: 's-a' },
+  ]);
+  await signIn('u1', 'global');
+  await mount();
+  await viewWorker();
+  expect(attentionDot()).toBeNull();
+
+  // 同一 membership id 直接切到另一个 realm:setMobileAuthOwner 不经过空身份,
+  // 裸 id 不变。它是另一个登录身份,global 下的「已查看」不能带过来。
+  await signIn('u1', 'cn');
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(attentionDot()).not.toBeNull();
+});
+
+it('跨设备切走再切回:同一登录身份下已读的完成不得复活为未读', async () => {
+  vi.useFakeTimers();
+  const mountOn = async (deviceId: string) => {
+    await act(async () => {
+      root.render(
+        createElement(OrcaWorkerStatusCard as any, {
+          leadSessionId: lead,
+          deviceId,
+          maker: stableMaker,
+          onOpenWorker: () => true,
+        }),
+      );
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  };
+  h.listOrcaWorkersByLead.mockResolvedValue([
+    { id: 'a', label: 'w', status: 'done', sessionId: 's-a' },
+  ]);
+
+  // 设备 A:done 产生未读,查看后清除。
+  await mountOn('dev-A');
+  expect(attentionDot()).not.toBeNull();
+  await viewWorker();
+  expect(attentionDot()).toBeNull();
+
+  // 切到设备 B:另一台机器上的同名 worker 是独立的,照常提示。
+  await mountOn('dev-B');
+  expect(attentionDot()).not.toBeNull();
+
+  // 切回设备 A,worker 仍是 done:同一轮 done,不得重新变未读。
+  await mountOn('dev-A');
+  expect(attentionDot()).toBeNull();
 });

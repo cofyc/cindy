@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useState } from 'react';
+import { useCallback, useEffect, useReducer, useState, useSyncExternalStore } from 'react';
 import { AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { ChevronDown, ChevronRight } from 'lucide-react-native';
@@ -7,6 +7,11 @@ import { useTheme, type ThemeColors } from '@/theme';
 import { i18n } from '@/i18n';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { hasDeviceLinkErrorCode } from '@/device-link/rehydrate';
+import {
+  getMobileAuthOwner,
+  subscribeMobileAuthOwner,
+  type MobileAuthOwnerGeneration,
+} from '@/auth/authOwnerGeneration';
 import { useDeviceLink } from '@/device-link/DeviceLinkContext';
 import { fontWeight, iconSize, iconStroke, lineHeight, radius, typeScale } from '@/theme/tokens';
 
@@ -53,44 +58,54 @@ function workerKey(worker: Worker, index: number): string {
 // 显示成绿色 Done。记下产生未读的状态,提示语义才跟着来源走。
 const unreadWorkers = new Map<string, string>();
 const lastWorkerStatus = new Map<string, string>();
-/** 当前 store 归属的「账号 + 设备」。任一变化即整体作废,见 resetWorkerAttentionScope。 */
-let attentionScope: string | null = null;
+/** 当前 store 归属的登录身份(见 workerAttentionOwnerScope)。变化即整体作废。 */
+let attentionOwner: string | null = null;
 
 /**
- * 未读与已读状态属于**当前登录账号在当前被控设备上**的视角。module 级 store 会跨
- * 登出与进程内换号存活,而 key 只含 Lead / Worker id —— 同一台 Desktop 的另一账号、
- * 或另一台 Desktop 上的同名 id,都可能继承上一份未读/已读。切换作用域时整体清空。
+ * 两个维度语义不同,不能揉成一个作用域:
+ *  - **登录身份**是作废边界:用 authOwnerGeneration 的 realm 限定 accountKey + generation,
+ *    而不是裸 membership id —— 同 id 重新登录、或跨 realm 同 id,都必须是新的身份,
+ *    否则上一轮的已读/状态会被新会话接受。身份一变,整个 store 清空。
+ *  - **设备**只是命名空间:并入 key 保留。切到设备 B 再切回 A 时,A 已查看的 done
+ *    必须仍是已读 —— 若随设备切换清空,`undefined → done` 会被当成新边沿重新变未读,
+ *    违反 orca-team-architecture.md:324 的「切走切回不得复活」。
  */
 /** @internal 导出仅供单测:围栏守的是「渲染期 reset 已执行、passive cleanup 未执行」那个
  * 窗口,act() 会把两者压在一起,无法经组件复现,只能直测。 */
-export function workerAttentionScope(accountScope: string, deviceId: string): string {
-  return `${accountScope}::${deviceId}`;
+export function workerAttentionOwnerScope(owner: MobileAuthOwnerGeneration): string {
+  return `${owner.accountKey}#${owner.generation}`;
 }
 
 /** @internal 导出仅供单测,理由同上。 */
-export function resetWorkerAttentionScope(scope: string): boolean {
-  if (attentionScope === scope) return false;
-  attentionScope = scope;
+export function resetWorkerAttentionScope(ownerScope: string): boolean {
+  if (attentionOwner === ownerScope) return false;
+  attentionOwner = ownerScope;
   unreadWorkers.clear();
   lastWorkerStatus.clear();
   return true;
 }
 
-function attentionKey(leadSessionId: string, key: string): string {
-  return `${leadSessionId}::${key}`;
+function attentionKey(deviceId: string, leadSessionId: string, key: string): string {
+  return `${deviceId}::${leadSessionId}::${key}`;
 }
 
 /** 按新快照推进边沿判定。返回未读集合是否变化,供调用方决定是否重渲染。 */
 /** @internal 导出仅供单测,理由同上。 */
-export function applyWorkerAttentionEdges(scope: string, leadSessionId: string, workers: Worker[]): boolean {
-  // 在飞响应的围栏:发起这轮请求时的作用域若已不是当前作用域,说明换号/换设备已经
-  // 发生且 store 已被重置 —— 这份数据属于上一个视角,必须整体丢弃,不能写进新 store。
-  // effect 依赖已含 accountScope / deviceId,正常路径下 cleanup 会先把 active 置否;
-  // 这道围栏挡的是「reset 已执行、cleanup 尚未执行」那一窗口里落地的响应。
-  if (scope !== attentionScope) return false;
+export function applyWorkerAttentionEdges(
+  ownerScope: string,
+  deviceId: string,
+  leadSessionId: string,
+  workers: Worker[],
+): boolean {
+  // 在飞响应的围栏:发起这轮请求时的登录身份若已不是当前身份,说明 store 已被重置 ——
+  // 这份数据属于上一个身份,必须整体丢弃。effect 依赖已含 ownerScope,正常路径下
+  // cleanup 会先把 active 置否;这道围栏挡的是「reset 已执行、cleanup 尚未执行」那一
+  // 窗口里落地的响应。设备不设围栏:换设备后落地的旧设备响应写进它自己的命名空间,
+  // 本就是那台设备的真实观测。
+  if (ownerScope !== attentionOwner) return false;
   let changed = false;
   workers.forEach((worker, index) => {
-    const key = attentionKey(leadSessionId, workerKey(worker, index));
+    const key = attentionKey(deviceId, leadSessionId, workerKey(worker, index));
     const status = worker.status ?? 'unknown';
     const previous = lastWorkerStatus.get(key);
     lastWorkerStatus.set(key, status);
@@ -127,12 +142,10 @@ function workersFrom(value: unknown): Worker[] {
   return [];
 }
 
-export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, maker, onOpenWorker }: {
+export function OrcaWorkerStatusCard({ leadSessionId, deviceId, maker, onOpenWorker }: {
   leadSessionId: string;
   /** 被控设备 id;用于跟踪该 peer 的在线代次(见下方 unsupported 复位)。 */
   deviceId: string;
-  /** 当前登录账号的稳定身份;未读/已读状态按它隔离,登出或换号即作废。 */
-  accountScope: string;
   maker: MobileMakerTransport;
   /**
    * 打开该 Worker 的会话;只读口径由 collaboration.ts 按 orcaRole 判定。
@@ -141,17 +154,21 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
   onOpenWorker?: (workerSessionId: string) => boolean;
 }) {
   const { colors } = useTheme();
+  // 登录身份直接订阅 authOwnerGeneration(与 useAutoUnlockSettings 等同一来源):它在
+  // React state 落定前就同步发布,且订阅保证身份变化必然重渲染,不依赖父组件。
+  const owner = useSyncExternalStore(subscribeMobileAuthOwner, getMobileAuthOwner);
+  const ownerScope = workerAttentionOwnerScope(owner);
   // 快照与它所属的 Lead 绑定,渲染期同步比对。抽屉就地换 Lead 时组件不卸载,若只靠
   // effect 事后清空,B 的首帧会先闪一遍 A 的 Worker 列表。
   const [snapshot, setSnapshot] = useState<
-    { account: string; device: string; lead: string; workers: Worker[] } | null
+    { owner: string; device: string; lead: string; workers: Worker[] } | null
   >(null);
-  // 快照必须与**账号 + 设备 + Lead**三者同时匹配才算有效。只比 Lead 不够:进程内换号时
-  // accountScope 先于 DeviceLinkContext 清空旧会话 store 变化,期间上一个账号的
-  // Worker 列表仍会被当成本账号的有效数据渲染出来。设备同理 —— 同一 Lead id 在
-  // 另一台被控机上不是同一份东西。
+  // 快照必须与**登录身份 + 设备 + Lead**三者同时匹配才算有效。只比 Lead 不够:进程内换号时
+  // 登录身份先于 DeviceLinkContext 清空旧会话 store 变化,期间上一个身份的 Worker 列表
+  // 仍会被当成当前身份的有效数据渲染出来。设备同理 —— 同一 Lead id 在另一台被控机上
+  // 不是同一份东西。
   const workers = snapshot
-    && snapshot.account === accountScope
+    && snapshot.owner === ownerScope
     && snapshot.device === deviceId
     && snapshot.lead === leadSessionId
     ? snapshot.workers
@@ -174,9 +191,8 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
   }, []);
   // 未读只存在于 module 级 store(见上),这里只用一个计数器触发重渲染。
   const [, bumpAttention] = useReducer((value: number) => value + 1, 0);
-  // 渲染期同步作废:换账号/换设备后首帧就不能沿用上一份未读,靠 effect 事后清会闪一帧。
-  const attentionScopeKey = workerAttentionScope(accountScope, deviceId);
-  resetWorkerAttentionScope(attentionScopeKey);
+  // 渲染期同步作废:登录身份变化后首帧就不能沿用上一份未读,靠 effect 事后清会闪一帧。
+  resetWorkerAttentionScope(ownerScope);
   // 换 Lead 时收起列表。快照不在此处清 —— 它由上面的 lead 比对同步失效,不依赖
   // effect 事后补刀。未读同样**不**重置:契约要求切走 / 切回不得让同一轮 done
   // 重新变未读。
@@ -217,15 +233,15 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
     // 捕获本轮 effect 的作用域。换号/换设备会让依赖变化 → 本 effect cleanup 置 active=false
     // 并重启;但 reset 发生在渲染期、早于 passive cleanup,那一窗口里落地的旧响应仍会走到
     // 下面,故把它传给 applyWorkerAttentionEdges 做围栏。
-    const scope = attentionScopeKey;
+    const capturedOwner = ownerScope;
     const load = async () => {
       // stop 不能用 return 代替:finally 照样会执行,只有标志能拦住下一轮排程。
       let stop = false;
       try {
         const next = workersFrom(await maker.listOrcaWorkersByLead(leadSessionId));
         if (active) {
-          applyWorkerAttentionEdges(scope, leadSessionId, next);
-          setSnapshot({ account: accountScope, device: deviceId, lead: leadSessionId, workers: next });
+          applyWorkerAttentionEdges(capturedOwner, deviceId, leadSessionId, next);
+          setSnapshot({ owner: capturedOwner, device: deviceId, lead: leadSessionId, workers: next });
         }
       } catch (error) {
         if (isUnsupportedChannelError(error)) {
@@ -248,7 +264,7 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
       active = false;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [leadSessionId, maker, polling, attentionScopeKey]);
+  }, [leadSessionId, deviceId, maker, polling, ownerScope]);
   // 拿到非空快照前不占位:本卡在 sessionChrome 里,其 onLayout 高度是消息列表的
   // 顶部内距,先撑开再收起会让会话内容跳动。
   if (!workers?.length) return null;
@@ -257,7 +273,7 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
   // 查看过就不再提示,直到该 Worker 的状态再次变动。
   // 取未读**产生时**的状态,而不是 worker 的当前状态。
   const pendingStatuses = workers
-    .map((worker, index) => unreadWorkers.get(attentionKey(leadSessionId, workerKey(worker, index))))
+    .map((worker, index) => unreadWorkers.get(attentionKey(deviceId, leadSessionId, workerKey(worker, index))))
     .filter((status): status is string => status !== undefined);
   const needsAttention = pendingStatuses.length > 0;
   const attentionStatus = pendingStatuses.includes('error') ? 'error' : 'done';
@@ -301,7 +317,7 @@ export function OrcaWorkerStatusCard({ leadSessionId, deviceId, accountScope, ma
               // 先看导航是否真的受理:guardedPush 在失焦 / 前进锁命中时静默丢弃。
               // 只有真打开了才算「正在查看」,否则该 Worker 会被误标已读。
               if (!onOpenWorker(workerSessionId)) return;
-              if (unreadWorkers.delete(attentionKey(leadSessionId, key))) bumpAttention();
+              if (unreadWorkers.delete(attentionKey(deviceId, leadSessionId, key))) bumpAttention();
             }}
             style={({ pressed }) => [styles.row, styles.rowPressable, pressed && { opacity: 0.6 }]}
             testID={`session.orcaWorkers.worker.${workerSessionId}`}
