@@ -31,7 +31,7 @@ export type ForkSessionResult = ControlResult<
 
 export interface ForkSessionDeps {
   getSessionContext(): LiziMcpSessionContext;
-  forkSession(params: { sessionId: string; messageId: string }): Promise<ForkSessionResult>;
+  forkSession(params: { callerSessionId: string; sessionId: string; messageId: string }): Promise<ForkSessionResult>;
 }
 
 const DESCRIPTION =
@@ -39,7 +39,7 @@ const DESCRIPTION =
   '新会话继承到该消息为止的全部上文,原会话保持不变,新会话会出现在侧栏。' +
   'message_id 取 history/get_chat_history 返回的消息 id;只能在 user 或 assistant 消息上分叉,' +
   '且必须在至少一条 AI 回复之后。在 user 消息上分叉时,新会话只含该消息之前的历史,该消息正文以 draft_text 随结果返回' +
-  '(GUI 会把它放进新会话的作曲器;需要继续时可用 send_to_session 发送)。远程会话不支持;每次调用需经用户确认。' +
+  '(GUI 会把它放进新会话的作曲器;需要继续时可用 send_to_session 发送)。远程会话不支持;不能从正在运行的任务分叉自身;每次调用需经用户确认。' +
   '失败码: NOT_FOUND(会话或消息不存在) / INVALID_ARGS(消息角色不合法) / ' +
   'PRECONDITION_FAILED(原会话尚未运行 / 无前置 AI 回复 / 远程会话) / UNSUPPORTED_CAPABILITY(该 agent 或历史格式不支持 fork) / HOST_NOT_READY / INTERNAL。';
 
@@ -66,7 +66,7 @@ export function registerForkSessionTool(
           `本次 MCP 调用没有绑定 ${BRAND_NAME} session,无法写库。`,
         );
       }
-      const result = await deps.forkSession({ sessionId: session_id, messageId: message_id });
+      const result = await deps.forkSession({ callerSessionId: ctx.sessionId, sessionId: session_id, messageId: message_id });
       if (!result.ok) return hostErrorPayload(result, BRAND_NAME);
       return okPayload({
         source_session_id: session_id,

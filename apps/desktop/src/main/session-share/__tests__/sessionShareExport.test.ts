@@ -198,6 +198,14 @@ describe('exportSessionShare', () => {
     rmSync(tmpRoot, { recursive: true, force: true });
   });
 
+  it('does not replace an existing destination when exclusive publish is requested', async () => {
+    const target = path.join(tmpRoot, 'no-overwrite.xdtshare');
+    await fsp.writeFile(target, 'user content');
+    await expect(exportSessionShare({ sessionId: 'xdt-session-1', targetPath: target, noOverwrite: true }))
+      .rejects.toMatchObject({ code: 'EEXIST' });
+    expect(await fsp.readFile(target, 'utf8')).toBe('user content');
+  });
+
   it('cc full export: transcripts + media + manifest roundtrip (encrypted)', async () => {
     const target = path.join(tmpRoot, 'out-full.xdtshare');
     const outcome = await exportSessionShare({

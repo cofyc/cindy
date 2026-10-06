@@ -42,7 +42,7 @@ describe('fork_session tool', () => {
     const { registry, fork } = setup();
     const res = await registry.call('fork_session', { session_id: 's1', message_id: 'm1' });
     expect(res.isError).toBeFalsy();
-    expect(fork).toHaveBeenCalledWith({ sessionId: 's1', messageId: 'm1' });
+    expect(fork).toHaveBeenCalledWith({ callerSessionId: 'current-session', sessionId: 's1', messageId: 'm1' });
     expect(parse(res)).toMatchObject({
       ok: true,
       source_session_id: 's1',

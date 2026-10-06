@@ -24,6 +24,7 @@ import { projectPersistedAgentFacingUserText } from '@cindy/maker-shared/agent-i
 import { joinChatQuoteTextSegments, parseChatQuoteSegments } from '@cindy/maker-shared/chat-quotes';
 
 import { bindingStore } from '../im/binding.js';
+import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { getDbClient, tryGetDbClient } from '../localDb/client/current.js';
 import { updateSessionInDb } from '../localDb/ipc/sessions.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
@@ -130,32 +131,39 @@ function draftBlocksToText(value: unknown): string {
 
 export function createSessionOperationsDeps(
   isTurnRunning: (sessionId: string) => boolean,
+  assertCurrent: () => void = () => {},
 ): SessionOperationsDeps {
   return {
     loadSessions: async (ids) => {
+      assertCurrent();
       if (ids.length === 0) return [];
       const rows = await getDbClient()
         .drizzle.select(ROW_COLUMNS)
         .from(sessions)
         .where(inArray(sessions.id, ids));
+      assertCurrent();
       return rows.map(toRow);
     },
     loadChildren: async (parentIds) => {
+      assertCurrent();
       if (parentIds.length === 0) return [];
       const rows = await getDbClient()
         .drizzle.select(ROW_COLUMNS)
         .from(sessions)
         .where(inArray(sessions.parentSessionId, parentIds));
+      assertCurrent();
       return rows.map(toRow);
     },
     // Worker 归属记录在 orca_teams → orca_workers(sessions.parent_session_id 只表示
     // fork 派生关系,创建 worker 时不会写它),与协同面板 / effectiveRunningSessionIds 同源。
     listWorkerSessionIds: async (leadSessionId) => {
+      assertCurrent();
       const rows = await getDbClient()
         .drizzle.select({ id: orcaWorkers.sessionId })
         .from(orcaWorkers)
         .innerJoin(orcaTeams, eq(orcaWorkers.teamId, orcaTeams.id))
         .where(and(eq(orcaTeams.leadSessionId, leadSessionId), eq(orcaTeams.status, 'active')));
+      assertCurrent();
       return rows.map((row) => row.id);
     },
     isTurnRunning,
@@ -167,13 +175,13 @@ export function createSessionOperationsDeps(
     //
     // 形状适配:骨架里的 beforeWrite 返回「拒绝原因」字符串,而 updateSessionInDb 的
     // moveGuard.beforeWrite 是抛错语义(见 localDb/ipc/sessions.ts);这里把前者翻成后者。
-    // assertCurrent / beforeUpdate 是 move_session 的 data-owner 与锁内复核钩子,
-    // 本骨架的工具不改工作区,无需参与,给成空实现。
+    // 与 move_session 同样在写路径的每个检查点复核账号代次。
     updateSession: (sessionId, patch, hooks) => {
+      assertCurrent();
       const guard = hooks?.beforeWrite
         ? {
-            assertCurrent: () => {},
-            beforeUpdate: async () => {},
+            assertCurrent,
+            beforeUpdate: async () => { assertCurrent(); },
             beforeWrite: async () => {
               const reason = await hooks.beforeWrite!();
               if (reason) throwIpcError('PRECONDITION_FAILED', reason);
@@ -183,7 +191,12 @@ export function createSessionOperationsDeps(
       const run = () => updateSessionInDb(sessionId, patch, undefined, guard);
       return guard ? bindingStore.runExclusive(run) : run();
     },
-    worktreeRemovalPreview: (sessionId) => getRemovalPreview(sessionId),
+    worktreeRemovalPreview: async (sessionId) => {
+      assertCurrent();
+      const preview = await getRemovalPreview(sessionId);
+      assertCurrent();
+      return preview;
+    },
     resolveDirectory: async (path) => {
       if (!isAbsolute(path)) return null;
       try {
@@ -201,13 +214,17 @@ export function createSessionOperationsDeps(
         return false;
       }
     },
-    exportShare: (opts) => exportSessionShare({ ...opts, password: null }),
+    exportShare: (opts) => {
+      assertCurrent();
+      return exportSessionShare({ ...opts, password: null, noOverwrite: true });
+    },
     openInNewWindow: (sessionId) => {
       const anchor = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0] ?? null;
       openSecondaryWindow(sessionId, anchor);
     },
     withSessionLock: (sessionId, task) => withSessionRouteLock(sessionId, task),
     resolveMessageClientId: async (sessionId, messageId) => {
+      assertCurrent();
       const [row] = await getDbClient()
         .drizzle.select({
           clientId: messages.clientId,
@@ -218,6 +235,7 @@ export function createSessionOperationsDeps(
         .from(messages)
         .where(and(eq(messages.sessionId, sessionId), eq(messages.id, messageId)))
         .limit(1);
+      assertCurrent();
       if (!row) return null;
       return {
         clientId: row.clientId,
@@ -230,6 +248,7 @@ export function createSessionOperationsDeps(
       };
     },
     forkAtMessage: async (sessionId, messageClientId) => {
+      assertCurrent();
       const session = await forkSessionAtMessage(sessionId, messageClientId);
       // 与 maker-ipc/fork.ts 的 IPC handler 同款广播,侧栏与 device-link 控制端即时看到新会话。
       emitSessionCreated(session.id);
@@ -249,60 +268,70 @@ export function createSessionOperationsDeps(
  * `XdtHelperMcpDeps` 的单工具可选回调逐个注入(与 moveSession 同款)。
  */
 export function createSessionOpsGuard(isTurnRunning: (sessionId: string) => boolean) {
-  const deps = createSessionOperationsDeps(isTurnRunning);
-  const hostFailure = (errorCode: 'HOST_NOT_READY' | 'INTERNAL', message: string) =>
+  const hostFailure = (errorCode: 'HOST_NOT_READY' | 'PRECONDITION_FAILED' | 'INTERNAL', message: string) =>
     ({ ok: false as const, errorCode, message });
   const notReady = hostFailure('HOST_NOT_READY', 'localDb not ready');
-  const guarded = <T>(run: () => Promise<T>): Promise<T | ReturnType<typeof hostFailure>> =>
-    tryGetDbClient()
-      ? run().catch((error) =>
-          hostFailure('INTERNAL', error instanceof Error ? error.message : String(error)),
-        )
-      : Promise.resolve(notReady);
-  return { deps, guarded };
+  const guarded = <T>(run: (deps: SessionOperationsDeps) => Promise<T>): Promise<T | ReturnType<typeof hostFailure>> => {
+    const client = tryGetDbClient();
+    if (!client || isAppSessionBoundaryPending()) return Promise.resolve(notReady);
+    const ownerScope = activeOwnerScopeKey();
+    const assertCurrent = () => {
+      if (isAppSessionBoundaryPending() || tryGetDbClient() !== client || activeOwnerScopeKey() !== ownerScope)
+        throwIpcError('PRECONDITION_FAILED', '当前 Cindy 账户已变化,请重新发起操作');
+    };
+    const deps = createSessionOperationsDeps(isTurnRunning, assertCurrent);
+    return run(deps).catch((error) => {
+      const code = (error as { code?: string })?.code;
+      return hostFailure(
+        code === 'PRECONDITION_FAILED' ? 'PRECONDITION_FAILED' : 'INTERNAL',
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  };
+  return { guarded };
 }
 
 /** cindy_helper pin_sessions / unpin_sessions 的 host 回调。 */
 export function createSetSessionsPinned(isTurnRunning: (sessionId: string) => boolean) {
-  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  const { guarded } = createSessionOpsGuard(isTurnRunning);
   return (params: { sessionIds: string[]; pinned: boolean }): Promise<SetSessionsPinnedResult> =>
-    guarded(() => setSessionsPinned(deps, params));
+    guarded((deps) => setSessionsPinned(deps, params));
 }
 
 /** cindy_helper delete_sessions 的 host 回调。 */
 export function createDeleteSessions(isTurnRunning: (sessionId: string) => boolean) {
-  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  const { guarded } = createSessionOpsGuard(isTurnRunning);
   return (params: {
     sessionIds: string[];
     dryRun: boolean;
     expectedDirty?: Record<string, boolean>;
-  }): Promise<DeleteSessionsResult> => guarded(() => deleteSessions(deps, params));
+  }): Promise<DeleteSessionsResult> => guarded((deps) => deleteSessions(deps, params));
 }
 
 /** cindy_helper export_session 的 host 回调。 */
 export function createExportSession(isTurnRunning: (sessionId: string) => boolean) {
-  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  const { guarded } = createSessionOpsGuard(isTurnRunning);
   return (params: { sessionId: string; targetPath: string; excludeMedia: boolean }): Promise<ExportSessionResult> =>
-    guarded(() => exportSession(deps, params, SHARE_FILE_EXT));
+    guarded((deps) => exportSession(deps, params, SHARE_FILE_EXT));
 }
 
 /** cindy_helper open_session_in_new_window 的 host 回调。 */
 export function createOpenSessionInNewWindow(isTurnRunning: (sessionId: string) => boolean) {
-  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  const { guarded } = createSessionOpsGuard(isTurnRunning);
   return (params: { sessionId: string }): Promise<OpenSessionInNewWindowResult> =>
-    guarded(() => openSessionInNewWindow(deps, params));
+    guarded((deps) => openSessionInNewWindow(deps, params));
 }
 
 /** cindy_helper get_session_branches 的 host 回调。 */
 export function createGetSessionBranches(isTurnRunning: (sessionId: string) => boolean) {
-  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
+  const { guarded } = createSessionOpsGuard(isTurnRunning);
   return (params: { sessionId: string }): Promise<GetSessionBranchesResult> =>
-    guarded(() => getSessionBranches(deps, params));
+    guarded((deps) => getSessionBranches(deps, params));
 }
 
 /** cindy_helper fork_session 的 host 回调。 */
 export function createForkSession(isTurnRunning: (sessionId: string) => boolean) {
-  const { deps, guarded } = createSessionOpsGuard(isTurnRunning);
-  return (params: { sessionId: string; messageId: string }): Promise<ForkSessionResult> =>
-    guarded(() => forkSession(deps, params));
+  const { guarded } = createSessionOpsGuard(isTurnRunning);
+  return (params: { callerSessionId: string; sessionId: string; messageId: string }): Promise<ForkSessionResult> =>
+    guarded((deps) => forkSession(deps, params));
 }

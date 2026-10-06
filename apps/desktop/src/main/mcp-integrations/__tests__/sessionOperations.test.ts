@@ -341,6 +341,16 @@ describe('deleteSessions', () => {
     expect(updateSession).not.toHaveBeenCalled();
   });
 
+  it('rejects a worktree dirtied after preflight but before the locked write', async () => {
+    let previews = 0;
+    const { deps } = makeDeps([row('a')], {
+      worktreeRemovalPreview: async () => ({ hasWorktree: true, dirty: ++previews > 1 }),
+    });
+    const res = await deleteSessions(deps, { sessionIds: ['a'], dryRun: false, expectedDirty: { a: false } });
+    expect(res).toMatchObject({ ok: false, errorCode: 'PRECONDITION_FAILED', items: [] });
+    expect(previews).toBe(2);
+  });
+
   it('rechecks running state inside the write lock and preserves deleted items', async () => {
     let checks = 0;
     const { deps, updateSession } = makeDeps([row('a'), row('b')], {
@@ -444,6 +454,13 @@ describe('exportSession', () => {
       ok: false,
       errorCode: 'PRECONDITION_FAILED',
     });
+    const { deps: raced } = makeDeps([row('a')], {
+      exportShare: async () => { throw Object.assign(new Error('exists'), { code: 'EEXIST' }); },
+    });
+    expect(await exportSession(raced, { ...params, targetPath: '/tmp/x.cshare' }, '.cshare')).toMatchObject({
+      ok: false,
+      errorCode: 'PRECONDITION_FAILED',
+    });
   });
 });
 
@@ -543,6 +560,19 @@ describe('getSessionBranches', () => {
 });
 
 describe('forkSession', () => {
+  it('does not reacquire the active caller session lock', async () => {
+    let lockCalls = 0;
+    const withSessionLock = async <T,>(_id: string, task: () => Promise<T>) => {
+      lockCalls += 1;
+      return task();
+    };
+    const { deps } = makeDeps([row('a')], { withSessionLock });
+    expect(await forkSession(deps, { callerSessionId: 'a', sessionId: 'a', messageId: 'm' })).toMatchObject({
+      ok: false,
+      errorCode: 'PRECONDITION_FAILED',
+    });
+    expect(lockCalls).toBe(0);
+  });
   it('resolves the message client id and returns the forked session', async () => {
     const forkAtMessage = vi.fn(async () => ({ id: 'forked' }));
     const { deps } = makeDeps([row('a'), row('forked', { parentSessionId: 'a' })], { forkAtMessage });

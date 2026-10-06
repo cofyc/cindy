@@ -83,6 +83,8 @@ export interface SessionShareExportOptions {
   password?: string | null;
   /** 超限重试时由 renderer 显式传入:跳过全部媒体,只保消息文本与转录。 */
   excludeMedia?: boolean;
+  /** MCP export must publish only when the target path is still absent. */
+  noOverwrite?: boolean;
   /** Host resource budget override; ordinary sharing retains its default limit. */
   sizeLimitBytes?: number;
   /** Host-only migration includes archived members without reviving them. */
@@ -900,7 +902,14 @@ export async function exportSessionShare(
   const tmpPath = `${opts.targetPath}.${randomBytes(8).toString('hex')}.tmp`;
   try {
     await fsp.writeFile(tmpPath, fileBytes, { flag: 'wx' });
-    await fsp.rename(tmpPath, opts.targetPath);
+    if (opts.noOverwrite) {
+      // Both paths are in the same directory. link fails with EEXIST if another
+      // export or user created the destination while the archive was built.
+      await fsp.link(tmpPath, opts.targetPath);
+      await fsp.unlink(tmpPath);
+    } else {
+      await fsp.rename(tmpPath, opts.targetPath);
+    }
   } catch (err) {
     await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
     throw err;

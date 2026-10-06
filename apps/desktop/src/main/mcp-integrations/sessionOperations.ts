@@ -271,7 +271,19 @@ export async function deleteSessions(
   for (const preview of previews) {
     try {
       await deps.updateSession(preview.sessionId, { status: 'deleted' }, {
-        beforeWrite: () => lateGuard(deps, preview.sessionId, { allowArchived: true }),
+        beforeWrite: async () => {
+          const reason = await lateGuard(deps, preview.sessionId, { allowArchived: true });
+          if (reason) return reason;
+          let current: { hasWorktree: boolean; dirty: boolean };
+          try {
+            current = await deps.worktreeRemovalPreview(preview.sessionId);
+          } catch {
+            return '无法复核 worktree 状态,请重新 dry_run 并向用户确认';
+          }
+          if ((current.hasWorktree && current.dirty) !== preview.dirtyWorktree)
+            return 'worktree 状态自预览后已变化,请重新 dry_run 并向用户确认';
+          return null;
+        },
       });
       items.push({ ...preview, status: 'deleted' });
     } catch (e) {
@@ -314,6 +326,7 @@ export async function exportSession(
     const code = (e as { code?: string }).code;
     const message = e instanceof Error ? e.message : String(e);
     if (code === 'NOT_FOUND' || code === 'PRECONDITION_FAILED') return err(code, message);
+    if (code === 'EEXIST') return err('PRECONDITION_FAILED', `目标文件已存在,不覆盖: ${targetPath}`);
     return err('INTERNAL', message);
   }
   if (outcome.status === 'oversize') {
@@ -423,8 +436,12 @@ export async function getSessionBranches(
  */
 export async function forkSession(
   deps: SessionOperationsDeps,
-  params: { sessionId: string; messageId: string },
+  params: { callerSessionId?: string; sessionId: string; messageId: string },
 ): Promise<ForkSessionResult> {
+  // An IM send may hold the caller's route lock until its tool call returns.
+  // Reacquiring it for the same source would deadlock that turn.
+  if (params.callerSessionId === params.sessionId)
+    return err('PRECONDITION_FAILED', '当前运行中的任务不能分叉自身;请从其他任务发起');
   const loaded = await loadAll(deps, [params.sessionId]);
   if (!Array.isArray(loaded)) return loaded;
   const [row] = loaded;
