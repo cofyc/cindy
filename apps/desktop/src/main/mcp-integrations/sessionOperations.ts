@@ -64,7 +64,7 @@ export interface SessionOperationsDeps {
   updateSession(
     sessionId: string,
     patch: Record<string, unknown>,
-    hooks?: { beforeWrite?: () => Promise<string | null> },
+    hooks?: { beforeWrite?: () => Promise<string | null>; skipIfPinnedUnchanged?: boolean },
   ): Promise<unknown>;
   /** WorktreeManager.getRemovalPreview:托管 worktree 是否存在、是否有未提交改动。 */
   worktreeRemovalPreview(sessionId: string): Promise<{ hasWorktree: boolean; dirty: boolean }>;
@@ -206,17 +206,14 @@ export async function setSessionsPinned(
   }
   const changed: SessionOpItem[] = [];
   for (const row of loaded) {
-    // 已经处于目标状态的跳过:重复写 pinnedAt 会打乱置顶排序,还会再触发一次强制摘要生成
-    // (updateSessionInDb 在 pinnedAt 落非空时 force 生成)。与 GUI 的「置顶/取消置顶」一致,
-    // 也让重试保持幂等 —— 未发生变化的不计入 changed。
-    if ((row.pinnedAt != null) === params.pinned) continue;
     try {
-      // 终态 / 运行态 / IM 接管的复核放在 updateSessionInDb 写锁内(beforeWrite):预检后被并发
-      // 归档或删除的会话不会再被写入 pinnedAt 并报成功。
-      await deps.updateSession(row.id, { pinnedAt: params.pinned ? new Date().toISOString() : null }, {
+      // 终态在路由锁内复核;幂等跳过由 SQL 条件写原子判定,覆盖未共用此锁的窗口写入。
+      // 锁外预读的 pinnedAt 可能已被另一窗口改变,不能据此决定跳过。
+      const updated = await deps.updateSession(row.id, { pinnedAt: params.pinned ? new Date().toISOString() : null }, {
         beforeWrite: () => lateGuard(deps, row.id, { allowArchived: false, checkRuntime: false }),
+        skipIfPinnedUnchanged: true,
       });
-      changed.push(toItem(row));
+      if (updated !== false) changed.push(toItem(row));
     } catch (e) {
       // 保留映射后的业务错误码,只有未知异常才是 INTERNAL;已完成的 changed 一并带回。
       const mapped = mapIpcError(e);

@@ -26,7 +26,7 @@ import { joinChatQuoteTextSegments, parseChatQuoteSegments } from '@cindy/maker-
 import { bindingStore } from '../im/binding.js';
 import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { getDbClient, tryGetDbClient } from '../localDb/client/current.js';
-import { updateSessionInDb } from '../localDb/ipc/sessions.js';
+import { SESSION_PIN_UNCHANGED, updateSessionInDb } from '../localDb/ipc/sessions.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { withSessionRouteLock } from '../localDb/sessionRouteLock.js';
 import { emitSessionCreated } from '../localDb/ipc/sessionCreatedBroadcast.js';
@@ -178,18 +178,23 @@ export function createSessionOperationsDeps(
     // 与 move_session 同样在写路径的每个检查点复核账号代次。
     updateSession: (sessionId, patch, hooks) => {
       assertCurrent();
-      const guard = hooks?.beforeWrite
+      const guard = hooks?.beforeWrite || hooks?.skipIfPinnedUnchanged
         ? {
             assertCurrent,
             beforeUpdate: async () => { assertCurrent(); },
             beforeWrite: async () => {
-              const reason = await hooks.beforeWrite!();
+              const reason = await hooks?.beforeWrite?.();
               if (reason) throwIpcError('PRECONDITION_FAILED', reason);
             },
+            skipIfPinnedUnchanged: hooks?.skipIfPinnedUnchanged,
           }
         : undefined;
       const run = () => updateSessionInDb(sessionId, patch, undefined, guard);
-      return guard ? bindingStore.runExclusive(run) : run();
+      const pending = guard ? bindingStore.runExclusive(run) : run();
+      return pending.catch((error: unknown) => {
+        if (error === SESSION_PIN_UNCHANGED) return false;
+        throw error;
+      });
     },
     worktreeRemovalPreview: async (sessionId) => {
       assertCurrent();

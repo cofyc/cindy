@@ -76,6 +76,7 @@ const log = createLogger('session-share-export');
  * 可到 2GB+)。更大的会话走「排除媒体重试」;流式落盘作为后续优化。
  */
 export const SHARE_EXPORT_SIZE_LIMIT_BYTES = 256 * 1024 * 1024;
+const LINK_UNSUPPORTED_CODES = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV']);
 
 export interface SessionShareExportOptions {
   sessionId: string;
@@ -905,7 +906,15 @@ export async function exportSessionShare(
     if (opts.noOverwrite) {
       // Both paths are in the same directory. link fails with EEXIST if another
       // export or user created the destination while the archive was built.
-      await fsp.link(tmpPath, opts.targetPath);
+      try {
+        await fsp.link(tmpPath, opts.targetPath);
+      } catch (error) {
+        if (!LINK_UNSUPPORTED_CODES.has((error as NodeJS.ErrnoException).code ?? '')) throw error;
+        // An exclusive copy writes directly to the final path and can leave a
+        // truncated share after a crash. Without hard links there is no safe
+        // atomic, no-replace publish through Node's file APIs; fail closed.
+        throw codedError('SHARE_EXPORT_FAILED', 'target file system cannot safely publish an exclusive share');
+      }
       await fsp.unlink(tmpPath);
     } else {
       await fsp.rename(tmpPath, opts.targetPath);

@@ -47,10 +47,14 @@ function makeDeps(rows: SessionOpsRow[], overrides: Partial<SessionOperationsDep
     async (
       id: string,
       patch: Record<string, unknown>,
-      hooks?: { beforeWrite?: () => Promise<string | null> },
+      hooks?: { beforeWrite?: () => Promise<string | null>; skipIfPinnedUnchanged?: boolean },
     ) => {
       const reason = await hooks?.beforeWrite?.();
       if (reason) throw Object.assign(new Error(`[PRECONDITION_FAILED] ${reason}`), { code: 'PRECONDITION_FAILED' });
+      if (hooks?.skipIfPinnedUnchanged) {
+        const [fresh] = await deps.loadSessions([id]);
+        if (fresh && (fresh.pinnedAt != null) === (patch.pinnedAt != null)) return false;
+      }
       return { ...byId.get(id), ...patch };
     },
   );
@@ -191,12 +195,40 @@ describe('setSessionsPinned', () => {
     const already = makeDeps([row('a', { pinnedAt: 1767225600000 })]);
     const res = await setSessionsPinned(already.deps, { sessionIds: ['a'], pinned: true });
     expect(res).toMatchObject({ ok: true, changed: [] });
-    expect(already.updateSession).not.toHaveBeenCalled();
+    expect(already.updateSession).toHaveBeenCalledTimes(1);
 
     const notPinned = makeDeps([row('b')]);
     const res2 = await setSessionsPinned(notPinned.deps, { sessionIds: ['b'], pinned: false });
     expect(res2).toMatchObject({ ok: true, changed: [] });
-    expect(notPinned.updateSession).not.toHaveBeenCalled();
+    expect(notPinned.updateSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses pin state observed inside the write path, not the preflight snapshot', async () => {
+    const initial = row('a', { pinnedAt: 1767225600000 });
+    let reads = 0;
+    const { deps, updateSession } = makeDeps([initial], {
+      loadSessions: async () => {
+        reads += 1;
+        return [{ ...initial, pinnedAt: reads === 1 ? initial.pinnedAt : null }];
+      },
+    });
+    const result = await setSessionsPinned(deps, { sessionIds: ['a'], pinned: true });
+    expect(result).toMatchObject({ ok: true, changed: [{ sessionId: 'a' }] });
+    expect(updateSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rewrite a pin applied after preflight', async () => {
+    const initial = row('a');
+    let reads = 0;
+    const { deps, updateSession } = makeDeps([initial], {
+      loadSessions: async () => {
+        reads += 1;
+        return [{ ...initial, pinnedAt: reads === 1 ? null : 1767225600000 }];
+      },
+    });
+    const result = await setSessionsPinned(deps, { sessionIds: ['a'], pinned: true });
+    expect(result).toMatchObject({ ok: true, changed: [] });
+    expect(updateSession).toHaveBeenCalledTimes(1);
   });
 
   it('rechecks terminal state inside the write lock and preserves changed items', async () => {
